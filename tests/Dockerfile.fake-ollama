@@ -1,0 +1,12 @@
+FROM ccobridge:1.1.0
+
+USER root
+WORKDIR /opt/fake-ollama
+COPY tests/fake_ollama.py /opt/fake-ollama/fake_ollama.py
+
+HEALTHCHECK NONE
+USER 65532:65532
+EXPOSE 11435
+
+ENTRYPOINT ["python3", "/opt/fake-ollama/fake_ollama.py"]
+CMD ["--host", "0.0.0.0", "--port", "11435"]

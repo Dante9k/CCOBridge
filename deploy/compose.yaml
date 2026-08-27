@@ -1,0 +1,22 @@
+services:
+  ccobridge:
+    image: ccobridge:1.1.0
+    container_name: ccobridge
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "4000"
+      INTERNAL_LITELLM_PORT: "4001"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=3).read()"
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 4

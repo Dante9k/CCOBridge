@@ -1,0 +1,35 @@
+# Runtime secrets and local overrides
+.env
+.env.*
+!.env.example
+!deploy/env.example
+.local-private-excludes
+
+# Python
+__pycache__/
+*.py[cod]
+.coverage
+.dev-tools/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Build and release artifacts
+build/
+dist/
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+*.deb
+*.run
+*.log
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

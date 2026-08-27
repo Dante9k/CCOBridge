@@ -1,0 +1,46 @@
+name: Feature request
+description: Propose a focused improvement to compatibility or offline delivery
+title: "[Feature]: "
+labels:
+  - enhancement
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Explain the user problem first. Requests outside the scope in ROADMAP.md may be declined to keep the gateway small and auditable.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What concrete workflow is blocked or unreliable today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe observable behavior, configuration, and compatibility expectations.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include workarounds and why they are insufficient.
+  - type: textarea
+    id: risks
+    attributes:
+      label: Security and offline-delivery impact
+      description: Note new dependencies, ports, credentials, network access, image size, or migration needs.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Submission checklist
+      options:
+        - label: I searched existing issues and ROADMAP.md.
+          required: true
+        - label: This request does not include private environment data.
+          required: true

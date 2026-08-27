@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality and unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install development tools
+        run: python3 -m pip install --disable-pip-version-check ruff==0.16.3
+
+      - name: Lint and check formatting
+        run: |
+          python3 -m ruff check .
+          python3 -m ruff format --check .
+
+      - name: Run unit tests
+        env:
+          PYTHONPATH: .
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Check shell scripts
+        run: shellcheck client/*.sh deploy/*.sh scripts/build-offline.sh tests/*.sh
+
+      - name: Check PowerShell helper
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
+          $issues = Invoke-ScriptAnalyzer -Path client/claude-ccobridge.ps1 -Severity Warning,Error
+          $issues | Format-Table -AutoSize
+          if ($issues) { exit 1 }
+
+      - name: Scan publication candidates
+        run: python3 scripts/check-public-release.py
+
+      - name: Validate Compose configuration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp deploy/env.example deploy/.env
+          trap 'rm -f deploy/.env' EXIT
+          docker compose -f deploy/compose.yaml config --quiet

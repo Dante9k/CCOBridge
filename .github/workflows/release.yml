@@ -1,0 +1,58 @@
+name: Build and publish release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, test, and publish offline bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Verify tag and source version match
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          grep -Fqx "VERSION=\"${version}\"" scripts/build-offline.sh
+
+      - name: Build and test offline bundle
+        env:
+          GATEWAY_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: ./scripts/build-offline.sh
+
+      - name: Test offline installation lifecycle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          sudo ./tests/run-install-lifecycle.sh "$version"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          bundle="dist/ccobridge-offline-${version}-linux-amd64.tar.gz"
+          checksum="${bundle}.sha256"
+          gh release create "$GITHUB_REF_NAME" \
+            "$bundle" \
+            "$checksum" \
+            --generate-notes \
+            --title "CCOBridge ${version}" \
+            --verify-tag

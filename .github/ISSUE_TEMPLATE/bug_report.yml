@@ -1,0 +1,83 @@
+name: Bug report
+description: Report a reproducible gateway, packaging, or compatibility defect
+title: "[Bug]: "
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Remove access keys, prompts, private addresses, usernames, and customer data before submitting.
+  - type: input
+    id: version
+    attributes:
+      label: Gateway version
+      description: The image tag or BUILD-INFO.txt gateway_version value.
+      placeholder: 1.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Anthropic Messages API
+        - OpenAI Chat Completions API
+        - Streaming
+        - Tool calling
+        - Docker image
+        - Offline installer or bundle
+        - Claude Code client helper
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, Docker and Compose versions, and Ollama version. Redact hostnames and addresses.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest deterministic sequence that reproduces the problem.
+      placeholder: |
+        1. Start the gateway with ...
+        2. Send a redacted request to ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs
+      description: Do not include keys, prompts, private endpoints, file contents, or personal data.
+      render: text
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Submission checklist
+      options:
+        - label: I searched existing issues and pull requests.
+          required: true
+        - label: I removed secrets and private environment details.
+          required: true
+        - label: I understand that security vulnerabilities must be reported privately under SECURITY.md.
+          required: true

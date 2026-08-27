@@ -1,0 +1,18 @@
+model_list:
+  - model_name: "*"
+    litellm_params:
+      model: ollama_chat/*
+      api_base: os.environ/OLLAMA_API_BASE
+      keep_alive: 8m
+    model_info:
+      mode: chat
+      supports_function_calling: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  disable_spend_logs: true
+
+litellm_settings:
+  drop_params: true
+  modify_params: true
+  set_verbose: false
