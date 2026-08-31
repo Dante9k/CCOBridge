@@ -4,7 +4,17 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ## [Unreleased]
 
-No unreleased changes.
+### Added
+
+- One installer now supports connected source builds and checksum-verified offline
+  image loading through explicit or automatic mode selection.
+- Release bundles now include the complete Git-tracked source tree alongside the
+  prebuilt image.
+
+### Changed
+
+- The installation lifecycle test now validates both source and offline deployment
+  paths.
 
 ## [1.1.0] - 2026-08-27
 

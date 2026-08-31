@@ -7,6 +7,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Platform: linux/amd64](https://img.shields.io/badge/platform-linux%2Famd64-1793d1)
 ![LiteLLM: v1.94.0](https://img.shields.io/badge/LiteLLM-v1.94.0-6f42c1)
+![Source deployable](https://img.shields.io/badge/source-deployable-success)
 ![Offline deployable](https://img.shields.io/badge/deployment-offline-success)
 
 [English](README.md) · [操作手册](docs/OPERATION-MANUAL.zh-CN.md) · [测试报告](docs/TEST-REPORT.zh-CN.md) · [安全策略](SECURITY.md)
@@ -66,6 +67,24 @@ OpenAI SDK / Cursor / Continue / OpenCode / 各类 Agent 框架
 
 正式部署使用 Linux host network。Ollama 可以继续只监听 `127.0.0.1:11434`，
 可信客户端只访问 CCOBridge 的 4000 端口。
+
+## 联网服务器从源码部署
+
+Ubuntu `x86_64` 服务器能够联网，并且已经具备 Docker、Compose、Ollama 和至少一个
+Ollama 模型时，直接执行：
+
+```bash
+git clone https://github.com/Dante9k/CCOBridge.git
+cd CCOBridge
+sudo ./deploy/install.sh --online
+```
+
+安装程序会在本地没有缓存时下载带 digest 锁定的 LiteLLM 基础镜像，从当前源码构建
+`ccobridge:1.1.0`，生成受保护的 API Key，启动网关并执行真实接口验收。重复运行不会
+覆盖已有 Key 和配置。
+
+`sudo ./deploy/install.sh` 使用自动模式：离线 Release 中存在镜像归档时直接加载，
+普通源码目录则从源码构建。需要固定行为时使用 `--online` 或 `--offline`。
 
 ## 支持的接口
 
@@ -213,7 +232,7 @@ system 内容位于开头。对 `POST /v1/messages`，CCOBridge 保证：
 [LiteLLM system 消息问题](https://github.com/BerriAI/litellm/issues/36917)
 的窄范围兼容措施，不是通用提示词改写功能。
 
-## 离线安装
+## 完全离线安装
 
 服务器要求：
 
@@ -224,18 +243,24 @@ system 内容位于开头。对 `POST /v1/messages`，CCOBridge 保证：
 - Ollama 至少已安装一个模型；
 - 4000 端口只允许可信客户端访问。
 
-复制离线包及相邻 SHA-256 文件后执行：
+在联网机器上从 GitHub Release 下载离线包及相邻 SHA-256 文件，复制到内网服务器后
+执行：
 
 ```bash
 sha256sum -c ccobridge-offline-1.1.0-linux-amd64.tar.gz.sha256
 tar -xzf ccobridge-offline-1.1.0-linux-amd64.tar.gz
 cd ccobridge-offline-1.1.0
-sudo ./deploy/install.sh
+sudo ./deploy/install.sh --offline
 ```
 
-安装程序会校验外层和包内文件、检查架构、Ollama、4000 端口和已有同名容器归属，
+离线包除了预构建 Docker 镜像、文档和校验值，还包含完整的 Git 已跟踪源码。安装
+程序会校验外层和包内文件、检查架构、Ollama、4000 端口和已有同名容器归属，
 在不拉取镜像的情况下加载本地镜像、保留已有 `.env`、首次生成权限为 `0600` 的
 API Key、使用 `--pull never` 启动 Compose，并执行真实 API 验收。
+
+真正断网的 Docker 主机无法仅凭源码生成一个本地不存在的基础镜像。如果目标机器
+不能访问镜像仓库，应使用 Release 中“源码 + 镜像”的离线包；这不是另一套代码，
+而是同一源码的完整交付形式。
 
 管理命令安装到 `/opt/ccobridge`：
 
@@ -258,8 +283,8 @@ sudo /opt/ccobridge/uninstall.sh
 ```
 
 构建脚本会拉取固定 LiteLLM 基础镜像、验证 digest、构建 `linux/amd64` 镜像、
-运行单元和双容器集成测试、导出镜像、生成校验值、重新加载正式归档，并再次执行
-完整测试。结果进入被 Git 忽略的 `dist/`。
+运行单元和双容器集成测试、导出镜像、打包完整 Git 已跟踪源码、生成校验值、重新
+加载正式归档，并再次执行完整测试。结果进入被 Git 忽略的 `dist/`。
 
 快速代码检查：
 
@@ -276,7 +301,8 @@ make integration
 
 Fake Ollama 测试覆盖认证、动态模型、别名、Chat Completions、Responses、
 Embeddings、OpenAI 与 Anthropic 流式输出、system 归一化、工具定义、tool call、
-tool result 和下游模型解析。Fake Ollama 和测试 Key 不会进入发布包。
+tool result 和下游模型解析。完整源码 Release 会保留 Fake Ollama 测试源码，但它不会
+进入正式镜像；包内凭据全部是明确的非机密测试占位值。
 
 ## 配置参考
 

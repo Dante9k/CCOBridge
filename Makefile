@@ -1,4 +1,13 @@
-.PHONY: check format integration lifecycle lint privacy test
+.PHONY: bundle check format install install-online integration lifecycle lint privacy test
+
+install:
+	sudo ./deploy/install.sh
+
+install-online:
+	sudo ./deploy/install.sh --online
+
+bundle:
+	./scripts/build-offline.sh
 
 check: lint test privacy
 

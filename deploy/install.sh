@@ -1,9 +1,43 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+VERSION="1.1.0"
+IMAGE="ccobridge:${VERSION}"
+BASE_TAG="ghcr.io/berriai/litellm:v1.94.0"
 BUNDLE_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 INSTALL_DIR="$(readlink -m "${INSTALL_DIR:-/opt/ccobridge}")"
-IMAGE_ARCHIVE="$BUNDLE_ROOT/image/ccobridge-1.1.0-linux-amd64.tar"
+IMAGE_ARCHIVE="$BUNDLE_ROOT/image/ccobridge-${VERSION}-linux-amd64.tar"
+INSTALL_MODE="auto"
+BUILD_INFO_SOURCE=""
+BUILD_INFO_TMP=""
+
+usage() {
+  cat <<'EOF'
+Usage: sudo ./deploy/install.sh [--auto|--online|--offline]
+
+  --auto     Load a bundled image when present; otherwise build from source.
+  --online   Build from this source tree using the pinned LiteLLM base image.
+  --offline  Require and load the bundled Docker image without network access.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --auto) INSTALL_MODE="auto" ;;
+    --online) INSTALL_MODE="online" ;;
+    --offline) INSTALL_MODE="offline" ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unknown installer option: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
 
 if [[ "$INSTALL_DIR" == "/" ]]; then
   printf '%s\n' 'Refusing to use the filesystem root as INSTALL_DIR.' >&2
@@ -23,12 +57,29 @@ case "$(uname -m)" in
     ;;
 esac
 
-for command_name in docker curl sha256sum sort ss; do
+if [[ "$INSTALL_MODE" == "auto" ]]; then
+  if [[ -r "$IMAGE_ARCHIVE" ]]; then
+    INSTALL_MODE="offline"
+  elif [[ -r "$BUNDLE_ROOT/Dockerfile" && -r "$BUNDLE_ROOT/BASE-IMAGE.lock" ]]; then
+    INSTALL_MODE="online"
+  else
+    printf '%s\n' \
+      'Neither a bundled image nor a complete CCOBridge source tree was found.' >&2
+    exit 1
+  fi
+fi
+
+for command_name in docker curl sort ss; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     printf 'Missing required command: %s\n' "$command_name" >&2
     exit 1
   fi
 done
+if [[ "$INSTALL_MODE" == "offline" ]] \
+  && ! command -v sha256sum >/dev/null 2>&1; then
+  printf '%s\n' 'Missing required command: sha256sum' >&2
+  exit 1
+fi
 
 if ! docker info >/dev/null 2>&1; then
   printf '%s\n' 'Docker is unavailable.' >&2
@@ -62,18 +113,39 @@ if ss -ltn | grep -Eq ':4000[[:space:]]'; then
     exit 1
   fi
 fi
-if [[ ! -r "$IMAGE_ARCHIVE" ]]; then
-  printf 'Image archive not found: %s\n' "$IMAGE_ARCHIVE" >&2
-  exit 1
-fi
 
-printf '%s\n' '[1/6] Verifying bundle files...'
-(cd "$BUNDLE_ROOT" && sha256sum -c SHA256SUMS)
-
-printf '%s\n' '[2/6] Checking the host Ollama service and installed models...'
 OLLAMA_TAGS="$(mktemp)"
 OLLAMA_VERSION_FILE="$(mktemp)"
-trap 'rm -f -- "$OLLAMA_TAGS" "$OLLAMA_VERSION_FILE"' EXIT
+cleanup() {
+  rm -f -- "$OLLAMA_TAGS" "$OLLAMA_VERSION_FILE"
+  if [[ -n "$BUILD_INFO_TMP" ]]; then
+    rm -f -- "$BUILD_INFO_TMP"
+  fi
+}
+trap cleanup EXIT
+
+if [[ "$INSTALL_MODE" == "offline" ]]; then
+  if [[ ! -r "$IMAGE_ARCHIVE" ]]; then
+    printf 'Offline image archive not found: %s\n' "$IMAGE_ARCHIVE" >&2
+    exit 1
+  fi
+  if [[ ! -r "$BUNDLE_ROOT/SHA256SUMS" ]]; then
+    printf 'Offline checksum manifest not found: %s\n' "$BUNDLE_ROOT/SHA256SUMS" >&2
+    exit 1
+  fi
+  printf '%s\n' '[1/6] Verifying the offline bundle...'
+  (cd "$BUNDLE_ROOT" && sha256sum -c SHA256SUMS)
+else
+  for source_path in Dockerfile BASE-IMAGE.lock entrypoint.py gateway litellm-config.yaml; do
+    if [[ ! -e "$BUNDLE_ROOT/$source_path" ]]; then
+      printf 'Incomplete source tree; missing: %s\n' "$source_path" >&2
+      exit 1
+    fi
+  done
+  printf '%s\n' '[1/6] Validating the source build inputs...'
+fi
+
+printf '%s\n' '[2/6] Checking the host Ollama service and installed models...'
 curl -fsS --max-time 10 http://127.0.0.1:11434/api/version -o "$OLLAMA_VERSION_FILE"
 OLLAMA_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$OLLAMA_VERSION_FILE")"
 MINIMUM_OLLAMA_VERSION='0.13.3'
@@ -89,8 +161,76 @@ if ! grep -Eq '"models"[[:space:]]*:[[:space:]]*\[[[:space:]]*\{' "$OLLAMA_TAGS"
   exit 1
 fi
 
-printf '%s\n' '[3/6] Loading the offline Docker image...'
-docker load -i "$IMAGE_ARCHIVE"
+if [[ "$INSTALL_MODE" == "offline" ]]; then
+  printf '%s\n' '[3/6] Loading the bundled Docker image...'
+  docker load -i "$IMAGE_ARCHIVE"
+  BUILD_INFO_SOURCE="$BUNDLE_ROOT/BUILD-INFO.txt"
+  if [[ ! -r "$BUILD_INFO_SOURCE" ]]; then
+    printf 'Offline build information not found: %s\n' "$BUILD_INFO_SOURCE" >&2
+    exit 1
+  fi
+else
+  printf '%s\n' '[3/6] Building the Docker image from source...'
+  LOCKED_DIGEST="$(sed -n 's/^digest=//p' "$BUNDLE_ROOT/BASE-IMAGE.lock")"
+  if [[ ! "$LOCKED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    printf 'Invalid base image digest in BASE-IMAGE.lock: %s\n' "$LOCKED_DIGEST" >&2
+    exit 1
+  fi
+  PINNED_BASE_IMAGE="${BASE_TAG}@${LOCKED_DIGEST}"
+  if ! docker image inspect "$PINNED_BASE_IMAGE" >/dev/null 2>&1; then
+    printf 'Pinned base image is not cached; downloading %s...\n' "$PINNED_BASE_IMAGE"
+    if ! docker pull --platform linux/amd64 "$PINNED_BASE_IMAGE"; then
+      printf '%s\n' \
+        'The pinned base image could not be downloaded. For an air-gapped host, use the offline GitHub Release bundle.' >&2
+      exit 1
+    fi
+  fi
+
+  SOURCE_REVISION="unknown"
+  if command -v git >/dev/null 2>&1 \
+    && git -C "$BUNDLE_ROOT" rev-parse --verify HEAD >/dev/null 2>&1; then
+    SOURCE_REVISION="$(git -C "$BUNDLE_ROOT" rev-parse --verify HEAD)"
+  fi
+  CREATED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  SOURCE_URL="${GATEWAY_SOURCE:-https://github.com/Dante9k/CCOBridge}"
+  docker build \
+    --platform linux/amd64 \
+    --build-arg "LITELLM_BASE_IMAGE=${PINNED_BASE_IMAGE}" \
+    --build-arg "LITELLM_BASE_DIGEST=${LOCKED_DIGEST}" \
+    --build-arg "GATEWAY_VERSION=${VERSION}" \
+    --build-arg "GATEWAY_REVISION=${SOURCE_REVISION}" \
+    --build-arg "GATEWAY_CREATED=${CREATED_AT}" \
+    --build-arg "GATEWAY_SOURCE=${SOURCE_URL}" \
+    -t "$IMAGE" \
+    "$BUNDLE_ROOT"
+
+  IMAGE_ARCH="$(docker image inspect --format '{{.Architecture}}' "$IMAGE")"
+  if [[ "$IMAGE_ARCH" != "amd64" ]]; then
+    printf 'Unexpected image architecture: %s\n' "$IMAGE_ARCH" >&2
+    exit 1
+  fi
+  if docker image inspect --format '{{json .Config.Env}}' "$IMAGE" \
+    | grep -Eq '(CCOBRIDGE_API_KEY|LITELLM_MASTER_KEY)=sk-[[:alnum:]]'; then
+    printf '%s\n' 'A runtime API key was found in image configuration.' >&2
+    exit 1
+  fi
+
+  BUILD_INFO_TMP="$(mktemp)"
+  IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
+  {
+    printf 'gateway_version=%s\n' "$VERSION"
+    printf 'gateway_image=%s\n' "$IMAGE"
+    printf 'gateway_image_id=%s\n' "$IMAGE_ID"
+    printf 'source_revision=%s\n' "$SOURCE_REVISION"
+    printf 'source_url=%s\n' "$SOURCE_URL"
+    printf '%s\n' 'install_mode=source-build'
+    printf '%s\n' 'target_platform=linux/amd64'
+    printf 'litellm_base=%s\n' "$BASE_TAG"
+    printf 'litellm_base_digest=%s\n' "$LOCKED_DIGEST"
+    printf 'built_at=%s\n' "$CREATED_AT"
+  } > "$BUILD_INFO_TMP"
+  BUILD_INFO_SOURCE="$BUILD_INFO_TMP"
+fi
 
 printf 'Installing into %s...\n' "$INSTALL_DIR"
 install -d -m 0755 "$INSTALL_DIR"
@@ -98,7 +238,7 @@ install -m 0644 "$BUNDLE_ROOT/deploy/compose.yaml" "$INSTALL_DIR/compose.yaml"
 for script_name in start stop logs verify uninstall; do
   install -m 0755 "$BUNDLE_ROOT/deploy/${script_name}.sh" "$INSTALL_DIR/${script_name}.sh"
 done
-install -m 0644 "$BUNDLE_ROOT/BUILD-INFO.txt" "$INSTALL_DIR/BUILD-INFO.txt"
+install -m 0644 "$BUILD_INFO_SOURCE" "$INSTALL_DIR/BUILD-INFO.txt"
 
 if [[ ! -e "$INSTALL_DIR/.env" ]]; then
   printf '%s\n' '[4/6] Generating the shared API key...'
@@ -122,7 +262,7 @@ else
   exit 1
 fi
 
-printf '%s\n' '[5/6] Starting the gateway without pulling images...'
+printf '%s\n' '[5/6] Starting the gateway without pulling runtime images...'
 (cd "$INSTALL_DIR" && docker compose --env-file .env up -d --pull never)
 
 printf '%s\n' '[6/6] Waiting for readiness and running acceptance checks...'
@@ -141,6 +281,7 @@ fi
 "$INSTALL_DIR/verify.sh"
 
 printf '\n%s\n' 'Installation complete.'
+printf 'Install mode: %s\n' "$INSTALL_MODE"
 printf 'Gateway (on this server): %s\n' 'http://127.0.0.1:4000'
 printf '%s\n' "Remote clients: replace 127.0.0.1 with this server's trusted-network address."
 printf '%s\n' 'Models: query authenticated GET /v1/models for installed models and aliases.'

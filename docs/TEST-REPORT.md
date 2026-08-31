@@ -1,9 +1,9 @@
 # CCOBridge Test Report
 
-- Report date: 2026-08-27
+- Report date: 2026-08-31
 - Tested release: `1.1.0`
 
-Conclusion: simulated protocol, image recovery, and offline installation tests passed;
+Conclusion: simulated protocol, image recovery, source installation, and offline installation tests passed;
 real-model and real-Agent acceptance remains environment-specific
 
 ## 1. Scope and claim boundary
@@ -43,8 +43,9 @@ Fake Ollama implements the minimum deterministic surface used by the suite:
 - `/v1/responses`; and
 - `/v1/embeddings`.
 
-It advertises one chat model and one embedding model, records downstream request fields
-for assertions, and never enters the release archive.
+It advertises one chat model and one embedding model and records downstream request
+fields for assertions. Its test source is present in the full-source Release but is
+never copied into the production image.
 
 ## 3. Static and unit checks
 
@@ -106,7 +107,8 @@ The release builder completed all seven stages:
 2. built `ccobridge:1.1.0` for `linux/amd64`;
 3. ran the unit and two-container integration suite;
 4. exported the production image with `docker save`;
-5. created and verified the inner manifest and outer SHA-256 file;
+5. packaged the complete tracked source and verified the inner manifest and outer
+   SHA-256 file;
 6. removed the primary image tag and reloaded the saved archive; and
 7. reran the complete suite against the reloaded image.
 
@@ -120,7 +122,8 @@ The release builder completed all seven stages:
 | Outer `.tar.gz.sha256` verifies the release archive | Passed |
 | Reloaded image ID matches the exported image ID | Passed |
 | Full post-reload integration suite | Passed |
-| Fake Ollama, fixtures, and test key excluded from release | Passed |
+| Complete Git-tracked source is present in the Release | Passed |
+| Fake Ollama and test placeholders are excluded from the production image | Passed |
 
 Generated deliverables:
 
@@ -133,7 +136,7 @@ The exact gateway image ID, source revision, build time, base digest, and target
 platform are stored in the release's `BUILD-INFO.txt`. The archive checksum is stored
 in the adjacent `.sha256` file rather than duplicated in this source document.
 
-## 6. Offline installation lifecycle
+## 6. Offline and source installation lifecycle
 
 The final archive was extracted into an isolated `/tmp/ccobridge-install-audit.*`
 directory and tested as root, matching the Ubuntu installer workflow. Before starting,
@@ -151,10 +154,15 @@ The lifecycle assertions passed:
 - host networking, `unless-stopped`, and non-root runtime identity matched policy;
 - a second installation preserved the exact `.env` contents and key;
 - uninstall removed the gateway container while retaining image and `.env`; and
+- the production image was removed and rebuilt from the source tree using the pinned,
+  locally cached base image;
+- source-mode installation passed the same live checks and recorded
+  `install_mode=source-build`; and
 - audit containers, temporary image tag, ports, directory, and credential were removed.
 
-The lifecycle script is available as `tests/run-install-lifecycle.sh` and is intentionally
-not part of the offline target-server package.
+The lifecycle script is available as `tests/run-install-lifecycle.sh`. It is included
+as auditable test source in the full-source Release but is not invoked during a normal
+target-server installation.
 
 ## 7. Security and privacy observations
 
@@ -200,6 +208,7 @@ For each Agent and model combination:
 ## 10. Conclusion
 
 CCOBridge `1.1.0` passed the defined static, unit, simulated protocol, authentication,
-streaming, tools, image recovery, checksum, repeated installation, and uninstall tests.
+streaming, tools, image recovery, checksum, source installation, offline installation,
+repeated installation, and uninstall tests.
 The result supports publishing a controlled release candidate. Production approval
 still depends on real-model and real-Agent acceptance in the target environment.

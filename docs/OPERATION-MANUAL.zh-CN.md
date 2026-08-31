@@ -24,7 +24,8 @@ OpenAI 兼容接口采用直接流式路径；Anthropic Messages 使用 LiteLLM 
 
 - `x86_64` 或 `amd64` 架构；
 - 正常运行的 Docker 和 Compose v2 插件；
-- `curl`、`sha256sum`、`sort`、`ss` 和 `tar`；
+- `curl`、`sort` 和 `ss`；
+- 联网源码安装需要 `git`，离线 Release 安装需要 `sha256sum` 和 `tar`；
 - `http://127.0.0.1:11434` 上的 Ollama `0.13.3` 或更高版本；
 - Ollama 至少已安装一个模型；
 - 未被占用且只允许可信网络访问的 TCP 4000。
@@ -43,7 +44,22 @@ ss -ltn | grep ':4000 ' || echo 'Port 4000 is free'
 根据实际 Agent 场景安装聊天、工具、视觉或 Embeddings 模型。网关不会为模型增加
 它本身不具备的能力。
 
-## 3. 传输与校验
+## 3. 选择安装路径
+
+### 3.1 联网源码安装
+
+服务器能够访问镜像仓库时执行：
+
+```bash
+git clone https://github.com/Dante9k/CCOBridge.git
+cd CCOBridge
+sudo ./deploy/install.sh --online
+```
+
+安装程序从当前检出的源码构建镜像，严格使用 `BASE-IMAGE.lock` 中的 LiteLLM digest；
+本机已有该基础镜像时直接复用，否则才下载锁定版本。
+
+### 3.2 完全离线 Release 的传输与校验
 
 从同一个 Release 复制：
 
@@ -60,19 +76,23 @@ sha256sum -c ccobridge-offline-1.1.0-linux-amd64.tar.gz.sha256
 
 校验不一致时不要继续安装。
 
-## 4. 安装
+## 4. 安装完全离线 Release
 
 ```bash
 tar -xzf ccobridge-offline-1.1.0-linux-amd64.tar.gz
 cd ccobridge-offline-1.1.0
-sudo ./deploy/install.sh
+sudo ./deploy/install.sh --offline
 ```
+
+解压后的 Release 同时包含完整 Git 已跟踪源码和预构建镜像。使用不带参数的
+`sudo ./deploy/install.sh` 也会自动识别并加载包内镜像。完全隔离的主机如果 Docker
+中没有锁定的基础镜像，就不能仅凭源码完成构建。
 
 安装程序会：
 
 1. 使用包内 `SHA256SUMS` 校验每个文件；
 2. 检查架构、Docker、Compose、4000 端口、已有容器归属、Ollama 版本和模型；
-3. 从本地归档加载 `ccobridge:1.1.0`；
+3. 从源码构建 `ccobridge:1.1.0`，或从本地归档加载它；
 4. 将管理脚本安装到 `/opt/ccobridge`；
 5. 只在 `.env` 不存在时生成随机 `sk-...` API Key；
 6. 检测到 `qwen3.8:latest` 时创建兼容旧版本的 `qwen-code` 别名；

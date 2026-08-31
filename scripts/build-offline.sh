@@ -13,7 +13,7 @@ BUNDLE_NAME="ccobridge-offline-${VERSION}-linux-amd64.tar.gz"
 GATEWAY_SOURCE="${GATEWAY_SOURCE:-}"
 CREATED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
-for command_name in docker curl python3 sha256sum tar; do
+for command_name in docker curl git python3 sha256sum tar; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     printf 'Missing required command: %s\n' "$command_name" >&2
     exit 1
@@ -36,8 +36,11 @@ docker pull --platform linux/amd64 "$BASE_TAG"
 BASE_REPO_DIGEST="$(docker image inspect --format '{{index .RepoDigests 0}}' "$BASE_TAG")"
 BASE_DIGEST="${BASE_REPO_DIGEST#*@}"
 LOCKED_DIGEST="$(sed -n 's/^digest=//p' "$ROOT_DIR/BASE-IMAGE.lock")"
-if ! SOURCE_REVISION="$(git -C "$ROOT_DIR" rev-parse --verify HEAD 2>/dev/null)"; then
-  SOURCE_REVISION="unknown"
+SOURCE_REVISION="$(git -C "$ROOT_DIR" rev-parse --verify HEAD)"
+SOURCE_DIRTY="false"
+if ! git -C "$ROOT_DIR" diff --quiet \
+  || ! git -C "$ROOT_DIR" diff --cached --quiet; then
+  SOURCE_DIRTY="true"
 fi
 
 if [[ "$BASE_DIGEST" != sha256:* ]]; then
@@ -79,24 +82,26 @@ printf '%s\n' '[3/7] Running local integration tests...'
 printf '%s\n' '[4/7] Exporting the Docker image...'
 docker save --output "$STAGE_DIR/image/$IMAGE_ARCHIVE_NAME" "$IMAGE"
 
-install -m 0644 "$ROOT_DIR/deploy/compose.yaml" "$STAGE_DIR/deploy/compose.yaml"
-install -m 0644 "$ROOT_DIR/deploy/env.example" "$STAGE_DIR/deploy/env.example"
-for script_name in install start stop logs verify uninstall; do
-  install -m 0755 "$ROOT_DIR/deploy/${script_name}.sh" "$STAGE_DIR/deploy/${script_name}.sh"
+SOURCE_LIST="$(mktemp)"
+git -C "$ROOT_DIR" ls-files -z --cached > "$SOURCE_LIST"
+tar -C "$ROOT_DIR" --null --files-from="$SOURCE_LIST" -cf - \
+  | tar -C "$STAGE_DIR" -xf -
+rm -f -- "$SOURCE_LIST"
+
+for script_path in \
+  client/claude-ccobridge.sh \
+  deploy/install.sh \
+  deploy/logs.sh \
+  deploy/start.sh \
+  deploy/stop.sh \
+  deploy/uninstall.sh \
+  deploy/verify.sh \
+  scripts/build-offline.sh \
+  scripts/check-public-release.py \
+  tests/run-install-lifecycle.sh \
+  tests/run-integration.sh; do
+  chmod 0755 "$STAGE_DIR/$script_path"
 done
-install -m 0755 "$ROOT_DIR/client/claude-ccobridge.sh" "$STAGE_DIR/client/claude-ccobridge.sh"
-install -m 0644 "$ROOT_DIR/client/claude-ccobridge.ps1" "$STAGE_DIR/client/claude-ccobridge.ps1"
-install -m 0644 "$ROOT_DIR/README.md" "$STAGE_DIR/README.md"
-install -m 0644 "$ROOT_DIR/README.zh-CN.md" "$STAGE_DIR/README.zh-CN.md"
-install -m 0644 "$ROOT_DIR/BASE-IMAGE.lock" "$STAGE_DIR/BASE-IMAGE.lock"
-for public_file in LICENSE SECURITY.md CONTRIBUTING.md ROADMAP.md THIRD_PARTY_NOTICES.md; do
-  install -m 0644 "$ROOT_DIR/$public_file" "$STAGE_DIR/$public_file"
-done
-install -m 0644 "$ROOT_DIR/docs/OPERATION-MANUAL.md" "$STAGE_DIR/docs/OPERATION-MANUAL.md"
-install -m 0644 "$ROOT_DIR/docs/OPERATION-MANUAL.zh-CN.md" "$STAGE_DIR/docs/OPERATION-MANUAL.zh-CN.md"
-install -m 0644 "$ROOT_DIR/docs/PUBLICATION-AUDIT.md" "$STAGE_DIR/docs/PUBLICATION-AUDIT.md"
-install -m 0644 "$ROOT_DIR/docs/TEST-REPORT.md" "$STAGE_DIR/docs/TEST-REPORT.md"
-install -m 0644 "$ROOT_DIR/docs/TEST-REPORT.zh-CN.md" "$STAGE_DIR/docs/TEST-REPORT.zh-CN.md"
 
 IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
 {
@@ -104,6 +109,7 @@ IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
   printf 'gateway_image=%s\n' "$IMAGE"
   printf 'gateway_image_id=%s\n' "$IMAGE_ID"
   printf 'source_revision=%s\n' "$SOURCE_REVISION"
+  printf 'source_dirty=%s\n' "$SOURCE_DIRTY"
   printf 'source_url=%s\n' "$GATEWAY_SOURCE"
   printf '%s\n' 'target_platform=linux/amd64'
   printf 'litellm_base=%s\n' "$BASE_TAG"

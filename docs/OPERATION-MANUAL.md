@@ -25,7 +25,9 @@ The server must have:
 
 - `x86_64` or `amd64` architecture;
 - a running Docker service and the Compose v2 plugin;
-- `curl`, `sha256sum`, `sort`, `ss`, and `tar`;
+- `curl`, `sort`, and `ss`;
+- `git` for a connected source checkout, or `sha256sum` and `tar` for an offline
+  Release;
 - Ollama `0.13.3` or newer on `http://127.0.0.1:11434`;
 - at least one installed Ollama model; and
 - an available TCP port 4000, restricted to trusted networks.
@@ -44,7 +46,23 @@ ss -ltn | grep ':4000 ' || echo 'Port 4000 is free'
 The tags response must contain at least one model. Install chat, tool, vision, or
 embedding models according to the Agent workflows you intend to use.
 
-## 3. Transfer and verify
+## 3. Choose an installation path
+
+### 3.1 Connected source installation
+
+On a server with registry access:
+
+```bash
+git clone https://github.com/Dante9k/CCOBridge.git
+cd CCOBridge
+sudo ./deploy/install.sh --online
+```
+
+The installer builds the image from the checked-out source. It uses the exact
+LiteLLM digest in `BASE-IMAGE.lock`, reuses a locally cached base image when present,
+and downloads that pinned base only when necessary.
+
+### 3.2 Air-gapped Release transfer and verification
 
 Transfer both files from the same release:
 
@@ -61,20 +79,25 @@ sha256sum -c ccobridge-offline-1.1.0-linux-amd64.tar.gz.sha256
 
 Do not continue after a checksum mismatch.
 
-## 4. Install
+## 4. Install the air-gapped Release
 
 ```bash
 tar -xzf ccobridge-offline-1.1.0-linux-amd64.tar.gz
 cd ccobridge-offline-1.1.0
-sudo ./deploy/install.sh
+sudo ./deploy/install.sh --offline
 ```
+
+The extracted Release contains the complete tracked source tree and the prebuilt
+image. `sudo ./deploy/install.sh` also works in auto mode and selects the bundled
+image. A source-only copy cannot bootstrap a completely isolated host unless the
+pinned base image is already present in Docker.
 
 The installer:
 
 1. verifies every bundled file using `SHA256SUMS`;
 2. checks architecture, Docker, Compose, port 4000, existing container ownership,
    Ollama version, and installed models;
-3. loads `ccobridge:1.1.0` from the local Docker archive;
+3. builds `ccobridge:1.1.0` from source or loads it from the local Docker archive;
 4. installs lifecycle files into `/opt/ccobridge`;
 5. creates a random `sk-...` API key only when `.env` does not exist;
 6. adds the backwards-compatible `qwen-code` alias when `qwen3.8:latest` exists;

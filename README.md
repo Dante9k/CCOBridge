@@ -7,6 +7,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Platform: linux/amd64](https://img.shields.io/badge/platform-linux%2Famd64-1793d1)
 ![LiteLLM: v1.94.0](https://img.shields.io/badge/LiteLLM-v1.94.0-6f42c1)
+![Source deployable](https://img.shields.io/badge/source-deployable-success)
 ![Offline deployable](https://img.shields.io/badge/deployment-offline-success)
 
 [中文](README.zh-CN.md) · [Operations](docs/OPERATION-MANUAL.md) · [Test report](docs/TEST-REPORT.md) · [Security](SECURITY.md)
@@ -72,6 +73,26 @@ OpenAI SDK / Cursor / Continue / OpenCode / agent frameworks
 
 The supported deployment uses Linux host networking. Ollama can remain bound to
 `127.0.0.1:11434`, while authenticated clients access only CCOBridge on port 4000.
+
+## Deploy from source on a connected server
+
+On an Internet-connected Ubuntu `x86_64` server with Docker, Compose, Ollama, and at
+least one Ollama model already available:
+
+```bash
+git clone https://github.com/Dante9k/CCOBridge.git
+cd CCOBridge
+sudo ./deploy/install.sh --online
+```
+
+The installer downloads the digest-pinned LiteLLM base image when it is not already
+cached, builds `ccobridge:1.1.0` from the checked-out source, generates a protected API
+key, starts the gateway, and runs live acceptance checks. Running the installer again
+preserves the existing key and configuration.
+
+`sudo ./deploy/install.sh` uses auto mode: it loads a bundled image when the checkout
+comes from an offline Release, otherwise it builds from source. Use `--online` or
+`--offline` when you want the mode to be explicit.
 
 ## Supported API surface
 
@@ -224,7 +245,7 @@ This is a narrow compatibility safeguard for the currently reported
 [LiteLLM system-message issue](https://github.com/BerriAI/litellm/issues/36917), not a
 general prompt-rewriting feature.
 
-## Offline installation
+## Air-gapped installation
 
 ### Server requirements
 
@@ -235,20 +256,27 @@ general prompt-rewriting feature.
 - at least one model already installed in Ollama; and
 - port 4000 restricted to trusted clients.
 
-Transfer the release archive and adjacent checksum file, then run:
+Download the offline archive and adjacent checksum from the GitHub Release on a
+connected machine, transfer both files, then run:
 
 ```bash
 sha256sum -c ccobridge-offline-1.1.0-linux-amd64.tar.gz.sha256
 tar -xzf ccobridge-offline-1.1.0-linux-amd64.tar.gz
 cd ccobridge-offline-1.1.0
-sudo ./deploy/install.sh
+sudo ./deploy/install.sh --offline
 ```
 
-The installer verifies the outer and inner checksums, checks the platform, Ollama,
+The offline archive contains the complete tracked source tree in addition to the
+prebuilt Docker image, documentation, and checksums. The installer verifies the outer
+and inner checksums, checks the platform, Ollama,
 port 4000, and any existing container ownership, loads the bundled image without
 pulling, preserves an existing `.env`, creates a
 mode-`0600` API key on first install, starts Compose with `--pull never`, and runs live
 acceptance checks.
+
+Source code alone cannot bootstrap a truly air-gapped Docker host unless the pinned
+base image is already cached. Use the Release bundle when the target has no registry
+access; it is the source-plus-image form of the same project.
 
 Lifecycle commands are installed under `/opt/ccobridge`:
 
@@ -272,8 +300,8 @@ Build the release in Linux or WSL 2 with Linux containers:
 
 The builder pulls the pinned LiteLLM base, verifies its digest, builds for
 `linux/amd64`, runs unit and two-container integration tests, exports the image,
-generates checksums, reloads the saved image, and reruns the suite. Outputs are placed
-in the ignored `dist/` directory.
+packages the complete Git-tracked source tree, generates checksums, reloads the saved
+image, and reruns the suite. Outputs are placed in the ignored `dist/` directory.
 
 Fast development checks:
 
@@ -291,7 +319,9 @@ make integration
 The deterministic Fake Ollama suite covers authentication, dynamic model discovery,
 aliases, Chat Completions, Responses, Embeddings, OpenAI and Anthropic streaming,
 system normalization, tool definitions, tool calls, tool results, and downstream
-model resolution. Fake Ollama and test keys are never included in release archives.
+model resolution. Fake Ollama remains test-only source in the full-source Release and
+is never copied into the production image; all bundled credentials are non-secret test
+placeholders.
 
 ## Configuration reference
 

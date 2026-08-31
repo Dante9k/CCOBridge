@@ -1,9 +1,9 @@
 # CCOBridge 测试报告
 
-- 报告日期：2026-08-27
+- 报告日期：2026-08-31
 - 测试版本：`1.1.0`
 
-结论：模拟协议、镜像恢复和离线安装测试通过；真实模型和真实 Agent 仍需按环境验收
+结论：模拟协议、镜像恢复、源码安装和离线安装测试通过；真实模型和真实 Agent 仍需按环境验收
 
 ## 1. 范围与声明边界
 
@@ -38,8 +38,8 @@ Fake Ollama 实现：
 - `/v1/responses`；
 - `/v1/embeddings`。
 
-它发布一个聊天模型和一个向量模型，并记录下游字段供断言使用。Fake Ollama 不进入
-正式发布包。
+它发布一个聊天模型和一个向量模型，并记录下游字段供断言使用。完整源码 Release
+保留测试源码，但 Fake Ollama 不会进入正式镜像。
 
 ## 3. 静态与单元检查
 
@@ -98,7 +98,7 @@ Fake Ollama 实现：
 2. 为 `linux/amd64` 构建 `ccobridge:1.1.0`；
 3. 执行单元和双容器集成测试；
 4. 使用 `docker save` 导出正式镜像；
-5. 创建并验证包内清单和外层 SHA-256；
+5. 打包完整 Git 已跟踪源码，并验证包内清单和外层 SHA-256；
 6. 删除主镜像标签，从归档重新加载；
 7. 对恢复后的镜像再次执行完整测试。
 
@@ -112,7 +112,8 @@ Fake Ollama 实现：
 | 外层 `.tar.gz.sha256` 验证发布包 | 通过 |
 | 重载后的镜像 ID 与导出前一致 | 通过 |
 | 完整恢复后集成测试 | 通过 |
-| 正式包不含 Fake Ollama、fixture 和测试 Key | 通过 |
+| Release 包含完整 Git 已跟踪源码 | 通过 |
+| 正式镜像不含 Fake Ollama 和测试占位凭据 | 通过 |
 
 交付文件：
 
@@ -124,7 +125,7 @@ dist/ccobridge-offline-1.1.0-linux-amd64.tar.gz.sha256
 最终镜像 ID、源码 revision、构建时间、基础 digest 和目标平台写入包内
 `BUILD-INFO.txt`。归档 SHA-256 位于相邻 `.sha256` 文件，不在源码报告中重复硬编码。
 
-## 6. 离线安装生命周期
+## 6. 离线与源码安装生命周期
 
 最终归档被解压到隔离的 `/tmp/ccobridge-install-audit.*`，以 root 模拟 Ubuntu 安装。
 测试发现同名既有容器或 4000/11434 端口占用时会直接退出；清理阶段只处理带有本次
@@ -140,9 +141,12 @@ dist/ccobridge-offline-1.1.0-linux-amd64.tar.gz.sha256
 - host network、`unless-stopped`、非 root 身份符合策略；
 - 第二次安装保持 `.env` 内容和 Key 完全不变；
 - 卸载删除 Gateway 容器，保留镜像和 `.env`；
+- 删除正式镜像后，使用本地缓存的锁定基础镜像从源码重新构建；
+- 源码安装通过相同在线验收，并记录 `install_mode=source-build`；
 - 审计容器、临时镜像标签、端口、目录和临时凭据已清理。
 
-生命周期脚本为 `tests/run-install-lifecycle.sh`，不会复制到目标服务器离线包。
+生命周期脚本为 `tests/run-install-lifecycle.sh`，作为可审计测试源码进入完整源码
+Release，但正常目标服务器安装不会自动执行它。
 
 ## 7. 安全与隐私观察
 
@@ -185,5 +189,5 @@ dist/ccobridge-offline-1.1.0-linux-amd64.tar.gz.sha256
 ## 10. 结论
 
 CCOBridge `1.1.0` 已通过静态、单元、模拟协议、认证、流式、工具、镜像恢复、校验值、
-重复安装和卸载测试，可以作为受控 Release Candidate 发布。生产批准仍取决于目标环境
-中的真实模型和真实 Agent 验收。
+源码安装、离线安装、重复安装和卸载测试，可以作为受控 Release Candidate 发布。
+生产批准仍取决于目标环境中的真实模型和真实 Agent 验收。
