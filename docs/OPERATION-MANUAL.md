@@ -291,6 +291,17 @@ curl -fsS 'http://127.0.0.1:4000/admin/usage?days=30' \
   -H 'Authorization: Bearer <admin-key>'
 ```
 
+Query the latest 20 privacy-safe request timings:
+
+```bash
+curl -fsS 'http://127.0.0.1:4000/admin/performance?limit=20&redact_users=true' \
+  -H 'Authorization: Bearer <admin-key>'
+```
+
+One report can return at most 200 events and the database retains the latest 1,000.
+It stores request ID, time, user identifier, model, endpoint, HTTP status, streaming
+flag, durations, and token counts—not bodies, client IPs, or plaintext keys.
+
 ## 11. Routine operations
 
 ```bash
@@ -300,6 +311,7 @@ sudo /opt/ccobridge/logs.sh
 sudo /opt/ccobridge/verify.sh
 sudo /opt/ccobridge/users.sh list
 sudo /opt/ccobridge/usage.sh
+sudo /opt/ccobridge/diagnose.sh
 ```
 
 With `restart: unless-stopped`, the container recovers after Docker or server restart.
@@ -336,6 +348,41 @@ This removes the container and preserves the image, `.env`, user-key digests, an
 usage database. Back up `/opt/ccobridge` before manually removing retained files.
 
 ## 14. Troubleshooting
+
+### The first request is very slow
+
+Start with the diagnostic that does not invoke a model:
+
+```bash
+cd /opt/ccobridge
+sudo ./diagnose.sh
+```
+
+Then optionally compare the gateway and direct Ollama path for one native model:
+
+```bash
+sudo ./diagnose.sh --benchmark qwen3.8:latest
+```
+
+The benchmark calls the gateway first and Ollama second, with at most 32 output
+tokens each. It is a quick diagnostic rather than a concurrency benchmark; the first
+gateway request can load the model and thereby warm the following direct request.
+
+Each inference response includes `x-ccobridge-request-id`; `Server-Timing` reports
+time to upstream response headers. Interpret `/admin/performance` as follows:
+
+| Field | Meaning | Investigate when high |
+|---|---|---|
+| `upstream_headers_ms` | request sent until upstream response headers | connection, queue, Ollama/LiteLLM pressure |
+| `first_byte_ms` | request start until first upstream body bytes | model load, queue, long-prompt evaluation |
+| `total_ms` | request start until body ends or the client disconnects | output length, generation rate, disconnects |
+| `observed_output_tokens_per_second` | observed rate when token usage is reported | model, quantization, GPU/CPU, concurrency |
+
+A non-streaming response returns its first HTTP body byte after full generation; use
+streaming when evaluating time to first token. If only the first call is slow, model
+loading is the usual cause. If Ollama control calls and direct inference are also slow,
+investigate the host/model/GPU. If direct Ollama is fast but the gateway is slow, keep
+the request ID and correlate it with `sudo ./logs.sh`.
 
 ### HTTP 401
 

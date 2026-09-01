@@ -21,7 +21,8 @@ Agent 和 Claude Code 共用同一个网关。
 
 OpenAI 兼容请求通过流式快速路径直接到达 Ollama；Anthropic Messages 请求由固定
 版本 LiteLLM 转换，并经过一层严格的 system 内容兼容处理。项目使用本地 SQLite
-汇总各用户 Token 用量，不需要 PostgreSQL、Redis、管理后台、计费系统或外部遥测。
+汇总各用户 Token 用量和近期脱敏性能计时，不需要 PostgreSQL、Redis、管理后台、
+计费系统或外部遥测。
 
 > [!IMPORTANT]
 > CCOBridge 解决的是协议、认证和交付问题，不能让模型凭空获得工具调用、视觉、
@@ -54,7 +55,7 @@ OpenAI SDK / Cursor / Continue / OpenCode / 各类 Agent 框架
                               ▼
                        CCOBridge :4000
                        ├─ 多 API Key 认证
-                       ├─ 本地 SQLite 用量聚合
+                       ├─ 本地 SQLite 用量与性能计时
                        ├─ 动态模型与别名
                        ├─ OpenAI 流式快速路径 ─────────────────┐
                        └─ Anthropic 兼容归一化                  │
@@ -102,6 +103,7 @@ sudo ./deploy/install.sh --online
 | `POST` | `/v1/messages` | 归一化 + LiteLLM | Claude Code 和 Anthropic 客户端 |
 | `GET` | `/admin/users` | CCOBridge | 管理员查询用户元数据，不返回密钥 |
 | `GET` | `/admin/usage` | CCOBridge + SQLite | 管理员查询聚合用量 |
+| `GET` | `/admin/performance` | CCOBridge + SQLite | 管理员查询近期脱敏耗时 |
 | `GET` | `/health/liveliness` | CCOBridge | 进程存活检查 |
 | `GET` | `/health/readiness` | CCOBridge + 上游检查 | Ollama 和 LiteLLM 就绪检查 |
 
@@ -216,7 +218,7 @@ sudo ./users.sh rotate alice
 ```
 
 轮换会立即使旧 Key 失效并只显示一次新 Key。普通用户可以调用模型，但访问
-`/admin/users` 或 `/admin/usage` 会得到 HTTP 403。
+`/admin/users`、`/admin/usage` 或 `/admin/performance` 会得到 HTTP 403。
 
 查看最近 30 天全部用量，或只查看指定用户：
 
@@ -229,6 +231,37 @@ sudo ./usage.sh 30 usr_0123456789abcdef
 已计量请求数和输入/输出/总 Token，不保存提示词或响应正文。`metered_requests` 小于
 `requests` 表示某些响应没有返回 usage；尤其是后端未提供最终 usage 的流式请求，项目
 不会用不准确的字符数猜测 Token。因此该统计适合容量和公平使用观察，不是计费账本。
+
+## 首次调用慢：一键判断网关还是模型
+
+先运行无推理开销的诊断：
+
+```bash
+cd /opt/ccobridge
+sudo ./diagnose.sh
+```
+
+它检查容器健康与重启次数、4000/11434 监听、CPU/内存/GPU、`ollama ps`、Ollama 和
+Gateway 控制面延迟，并显示最近 20 个脱敏请求计时。不会输出 Key、提示词、响应正文、
+客户端 IP 或用户名。需要用一个很小的真实请求对比网关和 Ollama 时，显式指定 Ollama
+原生模型名（不是 `qwen-code` 别名）：
+
+```bash
+sudo ./diagnose.sh --benchmark qwen3.8:latest
+```
+
+每个推理响应还会带 `x-ccobridge-request-id` 和 `Server-Timing`。性能报告保留最近
+1000 条事件，并提供 `upstream_headers_ms`、`first_byte_ms`、`total_ms` 与上游报告
+Token 可计算时的 `observed_output_tokens_per_second`：
+
+- `upstream_headers_ms` 或流式 `first_byte_ms` 很高，通常指向 Ollama 排队、模型冷加载
+  或长上下文预填充；
+- 首字节正常但总耗时高、输出 Token/s 低，通常是模型生成速度；
+- Ollama 直连明显快而网关仍慢，再用请求 ID 对照 `sudo ./logs.sh`；
+- 只有第一次慢而紧接着的请求快，通常是模型从磁盘加载到内存或显存。
+
+非流式 HTTP 必须等完整正文才能看到首字节，因此判断首 Token 延迟时应优先观察流式
+请求。计时只用于运维定位，不保存请求或响应内容，也不是严谨的并发压测结果。
 
 ## 动态模型与别名
 
@@ -312,6 +345,7 @@ sudo /opt/ccobridge/logs.sh
 sudo /opt/ccobridge/verify.sh
 sudo /opt/ccobridge/users.sh list
 sudo /opt/ccobridge/usage.sh
+sudo /opt/ccobridge/diagnose.sh
 sudo /opt/ccobridge/uninstall.sh
 ```
 
@@ -342,10 +376,11 @@ make check
 make integration
 ```
 
-Fake Ollama 测试覆盖多密钥认证、管理员隔离、Token 归属、动态模型、别名、Chat Completions、Responses、
-Embeddings、OpenAI 与 Anthropic 流式输出、system 归一化、工具定义、tool call、
-tool result 和下游模型解析。完整源码 Release 会保留 Fake Ollama 测试源码，但它不会
-进入正式镜像；包内凭据全部是明确的非机密测试占位值。
+Fake Ollama 测试覆盖多密钥认证、管理员隔离、Token 归属、请求 ID、响应计时、动态
+模型、别名、Chat Completions、Responses、Embeddings、OpenAI 与 Anthropic 流式
+输出、system 归一化、工具定义、tool call、tool result 和下游模型解析。完整源码
+Release 会保留 Fake Ollama 测试源码，但它不会进入正式镜像；包内凭据全部是明确的
+非机密测试占位值。
 
 ## 配置参考
 
@@ -369,9 +404,10 @@ CCOBridge 1.2 面向可信内网，提供独立用户 Key 和聚合用量，但�
 配额、SSO 或计费。必须通过主机或网络防火墙限制 4000，并且不能把无认证的 Ollama
 11434 暴露给客户端。
 
-兼容代理不会记录请求体和响应体；OpenAI 兼容流量转发到 Ollama 前会移除客户端
-凭据。管理员 Key 只在服务器首次安装时生成，以 `0600` 保存；用户 Key 只显示一次，
-磁盘仅保留摘要。密钥不会烘焙进镜像或发布包。
+兼容代理不会记录请求体和响应体；性能事件只保存时间、请求 ID、用户 ID、模型、接口、
+状态和 Token 计数，最多保留最近 1000 条。OpenAI 兼容流量转发到 Ollama 前会移除
+客户端凭据。管理员 Key 只在服务器首次安装时生成，以 `0600` 保存；用户 Key 只显示
+一次，磁盘仅保留摘要。密钥不会烘焙进镜像或发布包。
 
 公开发布前运行：
 

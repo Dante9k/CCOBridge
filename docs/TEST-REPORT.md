@@ -1,6 +1,6 @@
 # CCOBridge Test Report
 
-- Report date: 2026-08-31
+- Report date: 2026-09-01
 - Tested release: `1.2.0`
 
 Conclusion: simulated protocol, image recovery, source installation, and offline installation tests passed;
@@ -81,9 +81,13 @@ ordering, timestamps, and malformed Ollama payloads.
 | Credential isolation | Bearer and `x-api-key` headers do not reach Ollama | Passed |
 | Digest-only user keys | configuration contains SHA-256 digests, not plaintext user keys | Passed |
 | Administrator isolation | user key receives 403 from `/admin/users` and `/admin/usage` | Passed |
+| Performance isolation | user key receives 403 from `/admin/performance` | Passed |
 | User listing | administrator receives non-secret user metadata | Passed |
 | Token attribution | Chat usage is assigned to the requesting user, model, and endpoint | Passed |
 | Metering coverage | requests and metered requests are counted separately | Passed |
+| Request correlation | inference response includes an unpredictable request ID and `Server-Timing` | Passed |
+| Performance report | administrator receives recent timings, averages, and observed token rate | Passed |
+| Performance redaction | report can hide user identifiers and contains no request or response body | Passed |
 | Chat Completions | deterministic OpenAI response is preserved | Passed |
 | Chat SSE | split events reconstruct the expected text | Passed |
 | Completions | legacy completion response is preserved | Passed |
@@ -159,6 +163,8 @@ The lifecycle assertions passed:
 - user-key creation, automatic reload, disable, and re-enable passed;
 - plaintext user keys were absent from configuration and digest-file ownership matched policy;
 - per-user Chat token usage persisted in local SQLite;
+- the no-inference `diagnose.sh` reported container, control-plane, and redacted
+  performance data;
 - host networking, `unless-stopped`, and non-root runtime identity matched policy;
 - a second installation preserved `.env`, user configuration, and the usage database;
 - uninstall removed the gateway container while retaining image, `.env`, users, and usage; and
@@ -181,7 +187,9 @@ target-server installation.
 - CCOBridge does not log request or response bodies and disables Uvicorn access logs.
 - The installer creates the administrator credential at runtime; user keys are shown
   once and only their digests are persisted.
-- SQLite stores identity, model, endpoint, and aggregate counts, never prompt or response bodies.
+- SQLite usage rows store identity, model, endpoint, and aggregate counts. Performance
+  rows additionally store request ID, status, and timings and are capped at the latest
+  1,000. Neither table stores prompts, response bodies, client IPs, or plaintext keys.
 - The publication scanner found no private endpoint, user-profile path, private key,
   GitHub token, AWS access key, or long production-style `sk-...` literal.
 
@@ -219,8 +227,8 @@ For each Agent and model combination:
 ## 10. Conclusion
 
 CCOBridge `1.2.0` passed the defined static, unit, simulated protocol, multi-key
-authentication, administrator isolation, token attribution, streaming, tools, image
-recovery, checksum, source installation, offline installation, repeated installation,
-and uninstall tests.
+authentication, administrator isolation, token attribution, privacy-safe performance
+timing, streaming, tools, image recovery, checksum, source installation, offline
+installation, repeated installation, and uninstall tests.
 The result supports publishing a controlled release candidate. Production approval
 still depends on real-model and real-Agent acceptance in the target environment.

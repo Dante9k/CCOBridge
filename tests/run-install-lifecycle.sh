@@ -152,6 +152,11 @@ if ! grep -Eq '"total_tokens":[1-9][0-9]*' <<< "$USAGE_REPORT"; then
   printf '%s\n' 'Per-user token usage was not persisted.' >&2
   exit 1
 fi
+DIAGNOSIS_REPORT="$TMP_ROOT/diagnosis.txt"
+"$OFFLINE_INSTALL_DIR/diagnose.sh" > "$DIAGNOSIS_REPORT"
+grep -Fq 'name=/ccobridge running=true' "$DIAGNOSIS_REPORT"
+grep -Fq 'performance_report_begin' "$DIAGNOSIS_REPORT"
+grep -Fq '"object":"performance_report"' "$DIAGNOSIS_REPORT"
 "$OFFLINE_INSTALL_DIR/users.sh" disable "$USER_ID" >/dev/null
 USER_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
   -H "@$USER_AUTH_HEADER" http://127.0.0.1:4000/v1/models)"

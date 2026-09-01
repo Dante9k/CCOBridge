@@ -91,6 +91,7 @@ rm -f -- "$SOURCE_LIST"
 for script_path in \
   client/claude-ccobridge.sh \
   deploy/install.sh \
+  deploy/diagnose.sh \
   deploy/logs.sh \
   deploy/start.sh \
   deploy/stop.sh \

@@ -200,6 +200,15 @@ def main() -> None:
     assert "text/event-stream" in {
         key.lower(): value for key, value in openai_stream_headers.items()
     }.get("content-type", ""), openai_stream_headers
+    normalized_openai_headers = {
+        key.lower(): value for key, value in openai_stream_headers.items()
+    }
+    assert normalized_openai_headers.get("x-ccobridge-request-id"), (
+        openai_stream_headers
+    )
+    assert "ccobridge_upstream_headers;dur=" in normalized_openai_headers.get(
+        "server-timing", ""
+    ), openai_stream_headers
     assert "stream-" in openai_stream.decode() and "ok" in openai_stream.decode()
 
     status, openai_tool = request_json(
@@ -396,6 +405,10 @@ def main() -> None:
         f"{args.gateway}/admin/usage", headers=user_auth
     )
     assert status == 403, forbidden_usage
+    status, forbidden_performance = request_json(
+        f"{args.gateway}/admin/performance", headers=user_auth
+    )
+    assert status == 403, forbidden_performance
     usage = None
     for _attempt in range(20):
         status, usage = request_json(
@@ -412,9 +425,22 @@ def main() -> None:
     assert usage["totals"]["input_tokens"] >= 12, usage
     assert usage["totals"]["output_tokens"] >= 2, usage
 
+    status, performance = request_json(
+        f"{args.gateway}/admin/performance?limit=50&redact_users=true",
+        headers=auth,
+    )
+    assert status == 200, performance
+    assert performance["returned_events"] >= 1, performance
+    assert performance["summary"]["average_total_ms"] is not None, performance
+    assert all(
+        event["user_id"] == "redacted" and event["user_name"] == "redacted"
+        for event in performance["data"]
+    ), performance
+    assert all("request_id" in event for event in performance["data"]), performance
+
     print(
         "Integration tests passed: auth, dynamic models, aliases, OpenAI endpoints, "
-        "Anthropic normalization, streaming, tools, multi-key auth, and usage"
+        "Anthropic normalization, streaming, tools, multi-key auth, usage, and timing"
     )
 
 

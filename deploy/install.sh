@@ -239,7 +239,7 @@ fi
 printf 'Installing into %s...\n' "$INSTALL_DIR"
 install -d -m 0755 "$INSTALL_DIR"
 install -m 0644 "$BUNDLE_ROOT/deploy/compose.yaml" "$INSTALL_DIR/compose.yaml"
-for script_name in start stop logs verify uninstall users usage; do
+for script_name in start stop logs verify uninstall users usage diagnose; do
   install -m 0755 "$BUNDLE_ROOT/deploy/${script_name}.sh" "$INSTALL_DIR/${script_name}.sh"
 done
 install -m 0644 "$BUILD_INFO_SOURCE" "$INSTALL_DIR/BUILD-INFO.txt"

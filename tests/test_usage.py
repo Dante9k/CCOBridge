@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from gateway.auth import Principal
-from gateway.usage import UsageAccumulator, UsageStore
+from gateway.usage import RequestMetrics, UsageAccumulator, UsageStore
 
 
 class UsageAccumulatorTests(unittest.TestCase):
@@ -51,9 +51,38 @@ class UsageStoreTests(unittest.TestCase):
                 )
                 usage.finish()
 
-                store.record(principal, "qwen-code", "/v1/messages", 200, usage)
-                store.record(principal, "qwen-code", "/v1/messages", 200, usage)
+                metrics = RequestMetrics(
+                    request_id="request-test-1",
+                    streaming=True,
+                    upstream_headers_ms=12.5,
+                    first_byte_ms=50.0,
+                    total_ms=250.0,
+                )
+
+                store.record(
+                    principal,
+                    "qwen-code",
+                    "/v1/messages",
+                    200,
+                    usage,
+                    metrics,
+                )
+                store.record(
+                    principal,
+                    "qwen-code",
+                    "/v1/messages",
+                    200,
+                    usage,
+                    RequestMetrics(
+                        request_id="request-test-2",
+                        streaming=False,
+                        upstream_headers_ms=15.0,
+                        first_byte_ms=275.0,
+                        total_ms=280.0,
+                    ),
+                )
                 report = store.report(1, principal.key_id)
+                performance = store.performance_report(10, redact_users=True)
 
                 self.assertEqual(report["totals"]["requests"], 2)
                 self.assertEqual(report["totals"]["input_tokens"], 10)
@@ -61,6 +90,14 @@ class UsageStoreTests(unittest.TestCase):
                 self.assertEqual(report["totals"]["total_tokens"], 14)
                 self.assertEqual(report["data"][0]["user_name"], "alice")
                 self.assertNotIn("content", report["data"][0])
+                self.assertEqual(performance["returned_events"], 2)
+                self.assertEqual(performance["data"][0]["user_name"], "redacted")
+                self.assertEqual(performance["data"][1]["request_id"], "request-test-1")
+                self.assertEqual(
+                    performance["data"][1]["observed_output_tokens_per_second"],
+                    10.0,
+                )
+                self.assertNotIn("content", performance["data"][0])
             finally:
                 store.close()
 

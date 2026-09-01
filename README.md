@@ -110,6 +110,7 @@ comes from an offline Release, otherwise it builds from source. Use `--online` o
 | `POST` | `/v1/messages` | Normalization + LiteLLM | Claude Code and Anthropic clients |
 | `GET` | `/admin/users` | CCOBridge | Admin-only user metadata without keys |
 | `GET` | `/admin/usage` | CCOBridge + SQLite | Admin-only aggregate usage |
+| `GET` | `/admin/performance` | CCOBridge + SQLite | Admin-only recent timing data |
 | `GET` | `/health/liveliness` | CCOBridge | Process health |
 | `GET` | `/health/readiness` | CCOBridge + upstream checks | Ollama and LiteLLM readiness |
 
@@ -226,8 +227,8 @@ sudo ./users.sh rotate alice
 ```
 
 Rotation immediately invalidates the old key and displays the replacement once.
-User keys can call inference APIs but receive HTTP 403 from `/admin/users` and
-`/admin/usage`.
+User keys can call inference APIs but receive HTTP 403 from `/admin/users`,
+`/admin/usage`, and `/admin/performance`.
 
 View all usage for the last 30 days or filter by a user ID:
 
@@ -242,6 +243,38 @@ are stored—never prompts or response bodies. If `metered_requests` is lower th
 `requests`, the backend omitted usage for some responses. CCOBridge does not estimate
 missing streaming usage from character counts, so these figures support capacity and
 fair-use analysis rather than billing.
+
+## Diagnosing a slow first call
+
+Run the low-overhead diagnostic first; it does not invoke a model:
+
+```bash
+cd /opt/ccobridge
+sudo ./diagnose.sh
+```
+
+It reports container health and restarts, listeners, CPU/memory/GPU state, `ollama ps`,
+Ollama and gateway control-plane latency, and the latest 20 redacted request timings.
+It prints no key, prompt, response body, client IP, or user name. To compare a small
+gateway request with direct Ollama, explicitly pass the native Ollama model name—not
+an alias such as `qwen-code`:
+
+```bash
+sudo ./diagnose.sh --benchmark qwen3.8:latest
+```
+
+Inference responses include `x-ccobridge-request-id` and `Server-Timing`. The database
+retains the latest 1,000 performance events with `upstream_headers_ms`,
+`first_byte_ms`, `total_ms`, and observed output tokens/second when the upstream
+reports tokens. High header or streaming first-byte latency normally points to an
+Ollama queue, cold model load, or prompt evaluation. A normal first byte followed by
+a slow total and low token rate points to generation. If direct Ollama is fast while
+the gateway remains slow, correlate the request ID with `sudo ./logs.sh`. A slow first
+request followed by fast warm requests usually indicates model loading.
+
+For non-streaming HTTP, the first response byte follows full body generation; use a
+streaming request when measuring time to first token. These timings are operational
+signals, not a controlled concurrency benchmark.
 
 ## Dynamic models and aliases
 
@@ -332,6 +365,7 @@ sudo /opt/ccobridge/logs.sh
 sudo /opt/ccobridge/verify.sh
 sudo /opt/ccobridge/users.sh list
 sudo /opt/ccobridge/usage.sh
+sudo /opt/ccobridge/diagnose.sh
 sudo /opt/ccobridge/uninstall.sh
 ```
 

@@ -12,6 +12,8 @@ import json
 import logging
 import os
 import sqlite3
+import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -40,7 +42,7 @@ from gateway.normalize import (
     SystemMessageNormalizationError,
     normalize_anthropic_system_messages,
 )
-from gateway.usage import UsageAccumulator, UsageStore
+from gateway.usage import RequestMetrics, UsageAccumulator, UsageStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -189,17 +191,38 @@ def _metered_streaming_response(
     upstream: httpx.Response,
     principal: Principal,
     model: str,
+    request_id: str,
+    streaming: bool,
+    request_started_at: float,
+    upstream_started_at: float,
+    upstream_headers_at: float,
 ) -> StreamingResponse:
     accumulator = UsageAccumulator(upstream.headers.get("content-type", ""))
+    first_byte_at: float | None = None
 
     async def body() -> AsyncIterator[bytes]:
+        nonlocal first_byte_at
         try:
             async for chunk in upstream.aiter_raw():
+                if chunk and first_byte_at is None:
+                    first_byte_at = time.perf_counter()
                 accumulator.feed(chunk)
                 yield chunk
         finally:
+            finished_at = time.perf_counter()
             accumulator.finish()
             await upstream.aclose()
+            metrics = RequestMetrics(
+                request_id=request_id,
+                streaming=streaming,
+                upstream_headers_ms=(upstream_headers_at - upstream_started_at) * 1000,
+                first_byte_ms=(
+                    (first_byte_at - request_started_at) * 1000
+                    if first_byte_at is not None
+                    else None
+                ),
+                total_ms=(finished_at - request_started_at) * 1000,
+            )
             try:
                 await asyncio.shield(
                     asyncio.to_thread(
@@ -209,16 +232,64 @@ def _metered_streaming_response(
                         request.url.path,
                         upstream.status_code,
                         accumulator,
+                        metrics,
                     )
+                )
+                LOGGER.info(
+                    "performance request_id=%s user_id=%s endpoint=%s model=%s "
+                    "status=%d streaming=%s upstream_headers_ms=%.3f "
+                    "first_byte_ms=%s total_ms=%.3f input_tokens=%d "
+                    "output_tokens=%d metered=%s",
+                    request_id,
+                    principal.key_id,
+                    request.url.path,
+                    model,
+                    upstream.status_code,
+                    streaming,
+                    metrics.upstream_headers_ms,
+                    (
+                        f"{metrics.first_byte_ms:.3f}"
+                        if metrics.first_byte_ms is not None
+                        else "unavailable"
+                    ),
+                    metrics.total_ms,
+                    accumulator.input_tokens,
+                    accumulator.output_tokens,
+                    accumulator.metered,
                 )
             except (OSError, sqlite3.Error):
                 LOGGER.exception("Failed to persist aggregate token usage")
 
+    response_headers = _strip_response_headers(upstream.headers)
+    server_timing = (
+        f"ccobridge_upstream_headers;dur="
+        f"{(upstream_headers_at - upstream_started_at) * 1000:.3f}"
+    )
+    if existing_timing := response_headers.get("server-timing"):
+        server_timing = f"{existing_timing}, {server_timing}"
+    response_headers["server-timing"] = server_timing
+    response_headers["x-ccobridge-request-id"] = request_id
     return StreamingResponse(
         body(),
         status_code=upstream.status_code,
-        headers=_strip_response_headers(upstream.headers),
+        headers=response_headers,
     )
+
+
+def _annotate_upstream_error(
+    response: JSONResponse,
+    request_id: str,
+    upstream_started_at: float,
+) -> JSONResponse:
+    elapsed_ms = (time.perf_counter() - upstream_started_at) * 1000
+    response.headers["x-ccobridge-request-id"] = request_id
+    response.headers["server-timing"] = f"ccobridge_upstream_error;dur={elapsed_ms:.3f}"
+    LOGGER.warning(
+        "performance request_id=%s status=502 upstream_error_ms=%.3f",
+        request_id,
+        elapsed_ms,
+    )
+    return response
 
 
 @asynccontextmanager
@@ -334,6 +405,8 @@ async def retrieve_model(request: Request) -> JSONResponse:
 
 
 async def forward_openai(request: Request) -> StreamingResponse | JSONResponse:
+    request_started_at = time.perf_counter()
+    request_id = uuid.uuid4().hex
     principal = _require_principal(request)
     if isinstance(principal, JSONResponse):
         return principal
@@ -345,6 +418,7 @@ async def forward_openai(request: Request) -> StreamingResponse | JSONResponse:
         return _openai_error("Request body must be valid UTF-8 JSON", 400)
 
     public_model = _public_model(payload)
+    streaming = bool(payload.get("stream")) if isinstance(payload, dict) else False
     payload, changed = _rewrite_model(payload, request.app.state.aliases)
     content = (
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -360,18 +434,36 @@ async def forward_openai(request: Request) -> StreamingResponse | JSONResponse:
         headers=_strip_request_headers(request.headers, strip_authentication=True),
         content=content,
     )
+    upstream_started_at = time.perf_counter()
     try:
         upstream = await request.app.state.ollama_client.send(
             upstream_request, stream=True
         )
     except httpx.HTTPError:
-        return _openai_error(
-            "The Ollama service is unavailable", 502, error_type="gateway_error"
+        return _annotate_upstream_error(
+            _openai_error(
+                "The Ollama service is unavailable", 502, error_type="gateway_error"
+            ),
+            request_id,
+            upstream_started_at,
         )
-    return _metered_streaming_response(request, upstream, principal, public_model)
+    upstream_headers_at = time.perf_counter()
+    return _metered_streaming_response(
+        request,
+        upstream,
+        principal,
+        public_model,
+        request_id,
+        streaming,
+        request_started_at,
+        upstream_started_at,
+        upstream_headers_at,
+    )
 
 
 async def forward_anthropic(request: Request) -> StreamingResponse | JSONResponse:
+    request_started_at = time.perf_counter()
+    request_id = uuid.uuid4().hex
     principal = _require_principal(request, anthropic=True)
     if isinstance(principal, JSONResponse):
         return principal
@@ -387,6 +479,7 @@ async def forward_anthropic(request: Request) -> StreamingResponse | JSONRespons
     except SystemMessageNormalizationError as exc:
         return _anthropic_error(str(exc), 400)
     public_model = _public_model(payload)
+    streaming = bool(payload.get("stream")) if isinstance(payload, dict) else False
     payload, rewritten = _rewrite_model(payload, request.app.state.aliases)
     content = (
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -408,17 +501,33 @@ async def forward_anthropic(request: Request) -> StreamingResponse | JSONRespons
         headers=headers,
         content=content,
     )
+    upstream_started_at = time.perf_counter()
     try:
         upstream = await request.app.state.litellm_client.send(
             upstream_request, stream=True
         )
     except httpx.HTTPError:
-        return _anthropic_error(
-            "The internal LiteLLM service is unavailable",
-            502,
-            error_type="api_error",
+        return _annotate_upstream_error(
+            _anthropic_error(
+                "The internal LiteLLM service is unavailable",
+                502,
+                error_type="api_error",
+            ),
+            request_id,
+            upstream_started_at,
         )
-    return _metered_streaming_response(request, upstream, principal, public_model)
+    upstream_headers_at = time.perf_counter()
+    return _metered_streaming_response(
+        request,
+        upstream,
+        principal,
+        public_model,
+        request_id,
+        streaming,
+        request_started_at,
+        upstream_started_at,
+        upstream_headers_at,
+    )
 
 
 async def list_users(request: Request) -> JSONResponse:
@@ -464,6 +573,28 @@ async def usage_report(request: Request) -> JSONResponse:
     return JSONResponse(report)
 
 
+async def performance_report(request: Request) -> JSONResponse:
+    principal = _require_principal(request, admin=True)
+    if isinstance(principal, JSONResponse):
+        return principal
+    raw_limit = request.query_params.get("limit", "20")
+    try:
+        limit = int(raw_limit)
+    except ValueError:
+        return _openai_error("limit must be an integer between 1 and 200", 400)
+    if not 1 <= limit <= 200:
+        return _openai_error("limit must be an integer between 1 and 200", 400)
+    raw_redact = request.query_params.get("redact_users", "false").lower()
+    if raw_redact not in {"true", "false"}:
+        return _openai_error("redact_users must be true or false", 400)
+    report = await asyncio.to_thread(
+        request.app.state.usage_store.performance_report,
+        limit,
+        redact_users=raw_redact == "true",
+    )
+    return JSONResponse(report)
+
+
 async def not_found(request: Request) -> JSONResponse:
     return _openai_error(
         f"Unsupported endpoint: {request.url.path}",
@@ -481,6 +612,7 @@ routes = [
     Route("/v1/messages", forward_anthropic, methods=["POST"]),
     Route("/admin/users", list_users, methods=["GET"]),
     Route("/admin/usage", usage_report, methods=["GET"]),
+    Route("/admin/performance", performance_report, methods=["GET"]),
     *(Route(path, forward_openai, methods=["POST"]) for path in OPENAI_FORWARD_PATHS),
     Route(
         "/{path:path}",

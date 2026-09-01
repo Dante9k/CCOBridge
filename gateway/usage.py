@@ -7,6 +7,7 @@ import os
 import sqlite3
 import threading
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,18 @@ from gateway.auth import Principal
 
 MAX_JSON_RESPONSE_BYTES = 4 * 1024 * 1024
 UTC = timezone.utc  # noqa: UP017 - test tooling still supports Python 3.10.
+MAX_PERFORMANCE_EVENTS = 1000
+
+
+@dataclass(frozen=True, slots=True)
+class RequestMetrics:
+    """Privacy-safe timing measurements for one proxied inference request."""
+
+    request_id: str
+    streaming: bool
+    upstream_headers_ms: float
+    first_byte_ms: float | None
+    total_ms: float
 
 
 def _token_value(value: Any) -> int | None:
@@ -148,6 +161,28 @@ class UsageStore:
                 )
                 """
             )
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS performance_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recorded_at TEXT NOT NULL,
+                    request_id TEXT NOT NULL UNIQUE,
+                    key_id TEXT NOT NULL,
+                    key_name TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    endpoint TEXT NOT NULL,
+                    status_code INTEGER NOT NULL,
+                    streaming INTEGER NOT NULL,
+                    upstream_headers_ms REAL NOT NULL,
+                    first_byte_ms REAL,
+                    total_ms REAL NOT NULL,
+                    metered INTEGER NOT NULL,
+                    input_tokens INTEGER NOT NULL,
+                    output_tokens INTEGER NOT NULL,
+                    total_tokens INTEGER NOT NULL
+                )
+                """
+            )
         os.chmod(self.path, 0o600)
 
     def close(self) -> None:
@@ -161,6 +196,7 @@ class UsageStore:
         endpoint: str,
         status_code: int,
         usage: UsageAccumulator,
+        metrics: RequestMetrics,
     ) -> None:
         now = datetime.now(UTC)
         successful = int(200 <= status_code < 400)
@@ -196,6 +232,47 @@ class UsageStore:
                     usage.total_tokens,
                     now.isoformat().replace("+00:00", "Z"),
                 ),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO performance_events (
+                    recorded_at, request_id, key_id, key_name, model, endpoint,
+                    status_code, streaming, upstream_headers_ms, first_byte_ms,
+                    total_ms, metered, input_tokens, output_tokens, total_tokens
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now.isoformat().replace("+00:00", "Z"),
+                    metrics.request_id,
+                    principal.key_id,
+                    principal.name,
+                    model,
+                    endpoint,
+                    status_code,
+                    int(metrics.streaming),
+                    round(metrics.upstream_headers_ms, 3),
+                    (
+                        round(metrics.first_byte_ms, 3)
+                        if metrics.first_byte_ms is not None
+                        else None
+                    ),
+                    round(metrics.total_ms, 3),
+                    int(usage.metered),
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.total_tokens,
+                ),
+            )
+            self._connection.execute(
+                """
+                DELETE FROM performance_events
+                WHERE id NOT IN (
+                    SELECT id FROM performance_events
+                    ORDER BY id DESC
+                    LIMIT ?
+                )
+                """,
+                (MAX_PERFORMANCE_EVENTS,),
             )
 
     def report(self, days: int, key_id: str | None = None) -> dict[str, Any]:
@@ -247,4 +324,82 @@ class UsageStore:
             "filter": {"user_id": key_id},
             "totals": totals,
             "data": data,
+        }
+
+    def performance_report(
+        self, limit: int, *, redact_users: bool = False
+    ) -> dict[str, Any]:
+        """Return recent timing events and an aggregate, without request content."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT recorded_at, request_id, key_id, key_name, model, endpoint,
+                       status_code, streaming, upstream_headers_ms, first_byte_ms,
+                       total_ms, metered, input_tokens, output_tokens, total_tokens
+                FROM performance_events
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        fields = (
+            "recorded_at",
+            "request_id",
+            "user_id",
+            "user_name",
+            "model",
+            "endpoint",
+            "status_code",
+            "streaming",
+            "upstream_headers_ms",
+            "first_byte_ms",
+            "total_ms",
+            "metered",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+        )
+        events = [dict(zip(fields, row, strict=True)) for row in rows]
+        for event in events:
+            event["streaming"] = bool(event["streaming"])
+            event["metered"] = bool(event["metered"])
+            if redact_users:
+                event["user_id"] = "redacted"
+                event["user_name"] = "redacted"
+            generation_ms = (
+                float(event["total_ms"]) - float(event["first_byte_ms"])
+                if event["streaming"] and event["first_byte_ms"] is not None
+                else float(event["total_ms"])
+            )
+            event["observed_output_tokens_per_second"] = (
+                round(int(event["output_tokens"]) * 1000 / generation_ms, 3)
+                if int(event["output_tokens"]) > 0 and generation_ms > 0
+                else None
+            )
+
+        def average(field: str) -> float | None:
+            values = [
+                float(event[field]) for event in events if event[field] is not None
+            ]
+            return round(sum(values) / len(values), 3) if values else None
+
+        throughput = [
+            float(event["observed_output_tokens_per_second"])
+            for event in events
+            if event["observed_output_tokens_per_second"] is not None
+        ]
+        return {
+            "object": "performance_report",
+            "retained_event_limit": MAX_PERFORMANCE_EVENTS,
+            "returned_events": len(events),
+            "summary": {
+                "average_upstream_headers_ms": average("upstream_headers_ms"),
+                "average_first_byte_ms": average("first_byte_ms"),
+                "average_total_ms": average("total_ms"),
+                "average_observed_output_tokens_per_second": (
+                    round(sum(throughput) / len(throughput), 3) if throughput else None
+                ),
+            },
+            "data": events,
         }

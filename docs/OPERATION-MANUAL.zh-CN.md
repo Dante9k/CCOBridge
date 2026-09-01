@@ -276,6 +276,17 @@ curl -fsS 'http://127.0.0.1:4000/admin/usage?days=30' \
   -H 'Authorization: Bearer <admin-key>'
 ```
 
+查询最近 20 个请求的脱敏性能计时：
+
+```bash
+curl -fsS 'http://127.0.0.1:4000/admin/performance?limit=20&redact_users=true' \
+  -H 'Authorization: Bearer <admin-key>'
+```
+
+报告最多读取最近 200 条，数据库只保留最近 1000 条。它保存请求 ID、时间、用户标识、
+模型、接口、HTTP 状态、是否流式、耗时和 Token 计数，不保存请求体、响应体、客户端
+IP 或明文 Key。
+
 ## 11. 日常操作
 
 ```bash
@@ -285,6 +296,7 @@ sudo /opt/ccobridge/logs.sh
 sudo /opt/ccobridge/verify.sh
 sudo /opt/ccobridge/users.sh list
 sudo /opt/ccobridge/usage.sh
+sudo /opt/ccobridge/diagnose.sh
 ```
 
 `restart: unless-stopped` 会让容器在 Docker 或服务器重启后恢复；手工执行
@@ -320,6 +332,39 @@ sudo /opt/ccobridge/uninstall.sh
 保留文件前应备份整个 `/opt/ccobridge`。
 
 ## 14. 常见故障
+
+### 第一次调用特别慢
+
+先执行不触发模型推理的检查：
+
+```bash
+cd /opt/ccobridge
+sudo ./diagnose.sh
+```
+
+需要对比同一个原生 Ollama 模型的网关与直连路径时，再执行：
+
+```bash
+sudo ./diagnose.sh --benchmark qwen3.8:latest
+```
+
+基准会先通过 Gateway，再直接调用 Ollama，各最多生成 32 Token。它适合快速定位，不是
+并发压测；第一次 Gateway 请求可能同时完成模型冷加载，随后直连请求会享受热缓存。
+
+每个推理响应都有 `x-ccobridge-request-id`，`Server-Timing` 中包含等待上游响应头的
+耗时。`/admin/performance` 中的字段按以下方式解释：
+
+| 字段 | 含义 | 偏高时优先检查 |
+|---|---|---|
+| `upstream_headers_ms` | 请求上游到收到响应头 | Ollama/LiteLLM 连接、排队、服务压力 |
+| `first_byte_ms` | 网关收到第一段响应正文 | 模型加载、队列、长提示词预填充 |
+| `total_ms` | 客户端响应体结束或断开前的总时间 | 输出长度、生成速度、客户端中断 |
+| `observed_output_tokens_per_second` | 上游报告 Token 时的观察吞吐 | 模型、量化、GPU/CPU、并发争用 |
+
+非流式请求的首字节会等到完整响应生成，不能当作首 Token；判断首 Token 应使用流式
+请求。只有首次慢而第二次快，通常是模型从磁盘加载到内存/显存。Ollama 控制面和直连
+也慢时优先排查宿主机、模型和 GPU；直连快但 Gateway 仍慢时，保留请求 ID 并执行
+`sudo ./logs.sh` 对照结构化性能日志。
 
 ### HTTP 401
 

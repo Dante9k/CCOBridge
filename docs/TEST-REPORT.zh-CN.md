@@ -1,6 +1,6 @@
 # CCOBridge 测试报告
 
-- 报告日期：2026-08-31
+- 报告日期：2026-09-01
 - 测试版本：`1.2.0`
 
 结论：模拟协议、镜像恢复、源码安装和离线安装测试通过；真实模型和真实 Agent 仍需按环境验收
@@ -73,9 +73,13 @@ Fake Ollama 实现：
 | 凭据隔离 | Bearer 与 `x-api-key` 不到达 Ollama | 通过 |
 | 用户 Key 摘要 | 配置只包含 SHA-256 摘要，不包含用户明文 Key | 通过 |
 | 管理员隔离 | 用户 Key 访问 `/admin/users` 和 `/admin/usage` 返回 403 | 通过 |
+| 性能管理隔离 | 用户 Key 访问 `/admin/performance` 返回 403 | 通过 |
 | 用户列表 | 管理员可查询非机密用户元数据 | 通过 |
 | Token 归属 | Chat usage 计入发起请求的用户、模型和接口 | 通过 |
 | 用量覆盖 | `requests` 与 `metered_requests` 分开记录 | 通过 |
+| 请求关联 | 推理响应包含不可预测的请求 ID 和 `Server-Timing` | 通过 |
+| 性能报告 | 管理员可查询近期计时、平均值和观察 Token/s | 通过 |
+| 性能脱敏 | 报告可隐藏用户标识且不包含请求或响应正文 | 通过 |
 | Chat Completions | OpenAI 响应保持完整 | 通过 |
 | Chat SSE | 分段事件重新组成预期文本 | 通过 |
 | Completions | 旧版 completion 响应保持完整 | 通过 |
@@ -146,6 +150,7 @@ dist/ccobridge-offline-1.2.0-linux-amd64.tar.gz.sha256
 - 用户 Key 新建、动态生效、停用和重新启用通过；
 - 用户 Key 明文未写入配置，Key 摘要文件权限和属主符合策略；
 - 用户 Chat 的 Token 用量按用户持久化到本地 SQLite；
+- 无推理开销的 `diagnose.sh` 可读取容器、控制面延迟和脱敏性能报告；
 - host network、`unless-stopped`、非 root 身份符合策略；
 - 第二次安装保持 `.env` 和用户配置，且用量数据库继续存在；
 - 卸载删除 Gateway 容器，保留镜像、`.env`、用户配置和用量数据库；
@@ -164,7 +169,9 @@ Release，但正常目标服务器安装不会自动执行它。
 - 未支持路径不会暴露内部 LiteLLM 管理面。
 - CCOBridge 不记录请求体和响应体，并关闭 Uvicorn access log。
 - 管理员 Key 只在安装时生成；用户 Key 只显示一次，配置只保存摘要。
-- SQLite 只保存用户标识、模型、接口和聚合计数，不保存提示词或响应正文。
+- SQLite 用量表只保存用户标识、模型、接口和聚合计数；性能表额外保存请求 ID、
+  状态和耗时，自动限制为最近 1000 条。两者都不保存提示词、响应正文、客户端 IP
+  或明文 Key。
 - 扫描未发现内网地址、用户 Profile 路径、私钥、GitHub Token、AWS Key 或长生产型
   `sk-...` 字面量。
 
@@ -199,6 +206,6 @@ Release，但正常目标服务器安装不会自动执行它。
 ## 10. 结论
 
 CCOBridge `1.2.0` 已通过静态、单元、模拟协议、多密钥认证、管理员隔离、Token 归属、
-流式、工具、镜像恢复、校验值、源码安装、离线安装、重复安装和卸载测试，可以作为
-受控 Release Candidate 发布。
+脱敏性能计时、流式、工具、镜像恢复、校验值、源码安装、离线安装、重复安装和卸载
+测试，可以作为受控 Release Candidate 发布。
 生产批准仍取决于目标环境中的真实模型和真实 Agent 验收。

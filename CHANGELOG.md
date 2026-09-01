@@ -9,9 +9,12 @@ All notable changes are documented here. This project follows [Semantic Versioni
 - Independent user API keys with one-time secret display, digest-only storage,
   automatic reload, and enable, disable, and rotate operations.
 - Administrator-only `/admin/users` and `/admin/usage` endpoints.
+- Privacy-safe request timing with request IDs, `Server-Timing`, a retained
+  `/admin/performance` report, and structured performance logs.
 - Privacy-preserving SQLite aggregates for requests and backend-reported input,
   output, and total tokens by UTC day, user, model, and endpoint.
-- Offline-capable `users.sh` and `usage.sh` management helpers.
+- Offline-capable `users.sh`, `usage.sh`, and friendly `diagnose.sh` management
+  helpers, including an opt-in direct-Ollama comparison.
 - One installer now supports connected source builds and checksum-verified offline
   image loading through explicit or automatic mode selection.
 - Release bundles now include the complete Git-tracked source tree alongside the
