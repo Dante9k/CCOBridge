@@ -16,6 +16,7 @@ The roadmap is directional, not a promise of delivery. Security and correctness 
 - [ ] Publish reproducible release provenance and an SBOM alongside bundles
 - [x] Add dynamic Ollama model discovery and configurable aliases
 - [x] Add OpenAI Responses and Embeddings fast paths
+- [x] Add independently revocable user keys and local aggregate token usage
 - [ ] Add optional request-size and concurrency safeguards
 - [ ] Publish a tested Agent compatibility matrix with redacted fixtures
 - [ ] Add optional per-model capability metadata without fabricating capabilities

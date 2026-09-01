@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${1:-1.1.0}"
+VERSION="${1:-1.2.0}"
 BUNDLE="$ROOT_DIR/dist/ccobridge-offline-${VERSION}-linux-amd64.tar.gz"
 FAKE_CONTAINER="ccobridge-fake-ollama-lifecycle"
 GATEWAY_CONTAINER="ccobridge"
@@ -41,6 +41,7 @@ EXTRACT_DIR="$AUDIT_ROOT/extract"
 OFFLINE_INSTALL_DIR="$AUDIT_ROOT/offline-install"
 ONLINE_INSTALL_DIR="$AUDIT_ROOT/online-install"
 ENV_SNAPSHOT="$AUDIT_ROOT/env.snapshot"
+USER_AUTH_HEADER="$AUDIT_ROOT/user-auth-header"
 
 cleanup() {
   gateway_project_dir="$(
@@ -81,7 +82,14 @@ if [[ ! -x "$BUNDLE_ROOT/deploy/install.sh" ]]; then
   printf '%s\n' 'Extracted installer is missing or not executable.' >&2
   exit 1
 fi
-for source_path in Dockerfile gateway/proxy.py scripts/build-offline.sh tests/run-integration.sh; do
+for source_path in \
+  Dockerfile \
+  gateway/auth.py \
+  gateway/proxy.py \
+  gateway/usage.py \
+  gateway/userctl.py \
+  scripts/build-offline.sh \
+  tests/run-integration.sh; do
   if [[ ! -r "$BUNDLE_ROOT/$source_path" ]]; then
     printf 'Offline bundle is missing source file: %s\n' "$source_path" >&2
     exit 1
@@ -112,6 +120,9 @@ curl -fsS http://127.0.0.1:11434/api/version >/dev/null
 
 INSTALL_DIR="$OFFLINE_INSTALL_DIR" "$BUNDLE_ROOT/deploy/install.sh"
 [[ "$(stat -c '%a' "$OFFLINE_INSTALL_DIR/.env")" == "600" ]]
+[[ "$(stat -c '%a' "$OFFLINE_INSTALL_DIR/config/users.json")" == "600" ]]
+[[ "$(stat -c '%u:%g' "$OFFLINE_INSTALL_DIR/config/users.json")" == "10001:10001" ]]
+[[ "$(stat -c '%a' "$OFFLINE_INSTALL_DIR/data")" == "700" ]]
 cp -- "$OFFLINE_INSTALL_DIR/.env" "$ENV_SNAPSHOT"
 
 [[ "$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' ccobridge)" == \
@@ -120,8 +131,38 @@ cp -- "$OFFLINE_INSTALL_DIR/.env" "$ENV_SNAPSHOT"
 [[ "$(docker inspect --format '{{.Config.User}}' ccobridge)" == "10001:10001" ]]
 
 "$OFFLINE_INSTALL_DIR/verify.sh"
+USER_OUTPUT="$("$OFFLINE_INSTALL_DIR/users.sh" add alice)"
+USER_ID="$(printf '%s\n' "$USER_OUTPUT" | sed -n 's/^User ID: //p')"
+USER_KEY="$(printf '%s\n' "$USER_OUTPUT" | sed -n 's/^API key (shown once): //p')"
+[[ "$USER_ID" =~ ^usr_[0-9a-f]{16}$ ]]
+[[ "$USER_KEY" == sk-* ]]
+if grep -Fq "$USER_KEY" "$OFFLINE_INSTALL_DIR/config/users.json"; then
+  printf '%s\n' 'A plaintext user API key was stored on disk.' >&2
+  exit 1
+fi
+umask 077
+printf 'Authorization: Bearer %s\n' "$USER_KEY" > "$USER_AUTH_HEADER"
+curl -fsS \
+  -H "@$USER_AUTH_HEADER" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen-code","messages":[{"role":"user","content":"USAGE_TEST"}],"stream":false}' \
+  http://127.0.0.1:4000/v1/chat/completions >/dev/null
+USAGE_REPORT="$("$OFFLINE_INSTALL_DIR/usage.sh" 1 "$USER_ID")"
+if ! grep -Eq '"total_tokens":[1-9][0-9]*' <<< "$USAGE_REPORT"; then
+  printf '%s\n' 'Per-user token usage was not persisted.' >&2
+  exit 1
+fi
+"$OFFLINE_INSTALL_DIR/users.sh" disable "$USER_ID" >/dev/null
+USER_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
+  -H "@$USER_AUTH_HEADER" http://127.0.0.1:4000/v1/models)"
+[[ "$USER_STATUS" == "401" ]]
+"$OFFLINE_INSTALL_DIR/users.sh" enable "$USER_ID" >/dev/null
+
 INSTALL_DIR="$OFFLINE_INSTALL_DIR" "$BUNDLE_ROOT/deploy/install.sh" --offline
 cmp --silent "$ENV_SNAPSHOT" "$OFFLINE_INSTALL_DIR/.env"
+"$OFFLINE_INSTALL_DIR/users.sh" list | grep -Fq "$USER_ID"
+[[ -s "$OFFLINE_INSTALL_DIR/data/usage.sqlite3" ]]
+[[ "$(stat -c '%a' "$OFFLINE_INSTALL_DIR/data/usage.sqlite3")" == "600" ]]
 
 "$OFFLINE_INSTALL_DIR/uninstall.sh"
 if docker inspect "$GATEWAY_CONTAINER" >/dev/null 2>&1; then
@@ -129,6 +170,8 @@ if docker inspect "$GATEWAY_CONTAINER" >/dev/null 2>&1; then
   exit 1
 fi
 [[ -r "$OFFLINE_INSTALL_DIR/.env" ]]
+[[ -r "$OFFLINE_INSTALL_DIR/config/users.json" ]]
+[[ -s "$OFFLINE_INSTALL_DIR/data/usage.sqlite3" ]]
 docker image inspect "ccobridge:${VERSION}" >/dev/null
 
 docker image rm "ccobridge:${VERSION}" >/dev/null

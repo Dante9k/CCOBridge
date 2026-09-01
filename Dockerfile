@@ -1,7 +1,7 @@
 ARG LITELLM_BASE_IMAGE=ghcr.io/berriai/litellm:v1.94.0
 FROM ${LITELLM_BASE_IMAGE}
 
-ARG GATEWAY_VERSION=1.1.0
+ARG GATEWAY_VERSION=1.2.0
 ARG GATEWAY_REVISION=unknown
 ARG GATEWAY_CREATED
 ARG GATEWAY_SOURCE
@@ -38,6 +38,8 @@ ENV HOME=/tmp \
     GATEWAY_PORT=4000 \
     INTERNAL_LITELLM_PORT=4001 \
     CCOBRIDGE_MODEL_ALIASES={"qwen-code":"qwen3.8:latest"} \
+    CCOBRIDGE_KEYS_FILE=/etc/ccobridge/users.json \
+    CCOBRIDGE_USAGE_DB=/var/lib/ccobridge/usage.sqlite3 \
     LITELLM_CONFIG_PATH=/app/ccobridge/litellm-config.yaml \
     LITELLM_DISABLE_TELEMETRY=1 \
     DO_NOT_TRACK=1

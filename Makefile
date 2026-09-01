@@ -1,4 +1,4 @@
-.PHONY: bundle check format install install-online integration lifecycle lint privacy test
+.PHONY: bundle check format install install-online integration lifecycle lint privacy test usage users
 
 install:
 	sudo ./deploy/install.sh
@@ -31,3 +31,9 @@ integration:
 
 lifecycle:
 	sudo ./tests/run-install-lifecycle.sh
+
+users:
+	sudo /opt/ccobridge/users.sh list
+
+usage:
+	sudo /opt/ccobridge/usage.sh

@@ -1,7 +1,7 @@
 # CCOBridge 测试报告
 
 - 报告日期：2026-08-31
-- 测试版本：`1.1.0`
+- 测试版本：`1.2.0`
 
 结论：模拟协议、镜像恢复、源码安装和离线安装测试通过；真实模型和真实 Agent 仍需按环境验收
 
@@ -22,13 +22,13 @@
 | Linux | Ubuntu 22.04 |
 | Docker Engine | 29.7.2 |
 | 目标平台 | Linux / amd64 |
-| Gateway 镜像 | `ccobridge:1.1.0` |
+| Gateway 镜像 | `ccobridge:1.2.0` |
 | 运行身份 | `10001:10001` |
 | LiteLLM | `v1.94.0` |
 | 基础镜像 digest | `sha256:65d84a2282137b4dc73bbe184650a7c807177c533e4223b3bfbc87963fe3fabe` |
 | 上游 | 独立确定性 Fake Ollama 容器 |
 | 网络 | Linux host network |
-| 数据库 / Redis | 无 |
+| 持久化 | 本地 SQLite 用量聚合；无 PostgreSQL / Redis |
 
 Fake Ollama 实现：
 
@@ -45,7 +45,7 @@ Fake Ollama 实现：
 
 | 检查 | 证据 | 结果 |
 |---|---|---|
-| Python 单元测试 | 16 个 system、别名、解析和模型发现测试 | 通过 |
+| Python 单元测试 | 24 个 system、别名、模型、多密钥和用量测试 | 通过 |
 | Ruff lint | Bug、风格、导入、现代化和简化规则 | 通过 |
 | Ruff format | 全部 Python 文件格式检查 | 通过 |
 | ShellCheck | 客户端、部署、构建、集成和生命周期脚本 | 通过 |
@@ -63,7 +63,7 @@ Fake Ollama 实现：
 |---|---|---|
 | 存活与就绪 | Gateway、Ollama tags、内部 LiteLLM 均就绪 | 通过 |
 | 缺少认证 | 受保护接口返回 OpenAI 格式 HTTP 401 | 通过 |
-| Bearer | 正确共享 Key 可访问 OpenAI 路径 | 通过 |
+| Bearer | 管理员和独立用户 Key 均可访问推理路径 | 通过 |
 | Anthropic `x-api-key` | 正确 Key 可查询单个模型 | 通过 |
 | 动态模型 | 返回原生聊天和向量模型 | 通过 |
 | 别名发现 | 目标已安装的别名会被发布 | 通过 |
@@ -71,6 +71,11 @@ Fake Ollama 实现：
 | 别名路由 | 对外聊天别名解析为原生 Ollama 模型 | 通过 |
 | 原生路由 | 原生 Ollama 模型名不变 | 通过 |
 | 凭据隔离 | Bearer 与 `x-api-key` 不到达 Ollama | 通过 |
+| 用户 Key 摘要 | 配置只包含 SHA-256 摘要，不包含用户明文 Key | 通过 |
+| 管理员隔离 | 用户 Key 访问 `/admin/users` 和 `/admin/usage` 返回 403 | 通过 |
+| 用户列表 | 管理员可查询非机密用户元数据 | 通过 |
+| Token 归属 | Chat usage 计入发起请求的用户、模型和接口 | 通过 |
+| 用量覆盖 | `requests` 与 `metered_requests` 分开记录 | 通过 |
 | Chat Completions | OpenAI 响应保持完整 | 通过 |
 | Chat SSE | 分段事件重新组成预期文本 | 通过 |
 | Completions | 旧版 completion 响应保持完整 | 通过 |
@@ -95,7 +100,7 @@ Fake Ollama 实现：
 发布构建脚本完成全部七个阶段：
 
 1. 拉取 LiteLLM `v1.94.0`，解析 digest 并与 `BASE-IMAGE.lock` 比较；
-2. 为 `linux/amd64` 构建 `ccobridge:1.1.0`；
+2. 为 `linux/amd64` 构建 `ccobridge:1.2.0`；
 3. 执行单元和双容器集成测试；
 4. 使用 `docker save` 导出正式镜像；
 5. 打包完整 Git 已跟踪源码，并验证包内清单和外层 SHA-256；
@@ -118,8 +123,8 @@ Fake Ollama 实现：
 交付文件：
 
 ```text
-dist/ccobridge-offline-1.1.0-linux-amd64.tar.gz
-dist/ccobridge-offline-1.1.0-linux-amd64.tar.gz.sha256
+dist/ccobridge-offline-1.2.0-linux-amd64.tar.gz
+dist/ccobridge-offline-1.2.0-linux-amd64.tar.gz.sha256
 ```
 
 最终镜像 ID、源码 revision、构建时间、基础 digest 和目标平台写入包内
@@ -138,9 +143,12 @@ dist/ccobridge-offline-1.1.0-linux-amd64.tar.gz.sha256
 - 本地镜像加载并以 `--pull never` 启动；
 - 动态模型、Chat、Responses 和 Anthropic 在线验收通过；
 - 生成的 `sk-...` Key 文件权限为 `0600`；
+- 用户 Key 新建、动态生效、停用和重新启用通过；
+- 用户 Key 明文未写入配置，Key 摘要文件权限和属主符合策略；
+- 用户 Chat 的 Token 用量按用户持久化到本地 SQLite；
 - host network、`unless-stopped`、非 root 身份符合策略；
-- 第二次安装保持 `.env` 内容和 Key 完全不变；
-- 卸载删除 Gateway 容器，保留镜像和 `.env`；
+- 第二次安装保持 `.env` 和用户配置，且用量数据库继续存在；
+- 卸载删除 Gateway 容器，保留镜像、`.env`、用户配置和用量数据库；
 - 删除正式镜像后，使用本地缓存的锁定基础镜像从源码重新构建；
 - 源码安装通过相同在线验收，并记录 `install_mode=source-build`；
 - 审计容器、临时镜像标签、端口、目录和临时凭据已清理。
@@ -150,16 +158,18 @@ Release，但正常目标服务器安装不会自动执行它。
 
 ## 7. 安全与隐私观察
 
-- 对外推理接口使用常量时间比较共享 Key。
+- 对外推理接口对管理员和全部用户 Key 摘要执行常量时间比较。
 - 接受 Bearer 和 `x-api-key`，两者均不会转发给 Ollama。
 - 健康端点只返回粗粒度状态。
 - 未支持路径不会暴露内部 LiteLLM 管理面。
 - CCOBridge 不记录请求体和响应体，并关闭 Uvicorn access log。
-- Key 只在安装时生成，重复安装保留已有密钥。
+- 管理员 Key 只在安装时生成；用户 Key 只显示一次，配置只保存摘要。
+- SQLite 只保存用户标识、模型、接口和聚合计数，不保存提示词或响应正文。
 - 扫描未发现内网地址、用户 Profile 路径、私钥、GitHub Token、AWS Key 或长生产型
   `sk-...` 字面量。
 
-这不是渗透测试或依赖漏洞审计。默认模式仍为 HTTP + 单共享 Key，只能用于可信网络。
+这不是渗透测试或依赖漏洞审计。默认模式仍为 HTTP，只能用于可信网络；Token 统计
+依赖上游返回的 usage，不作为计费账本。
 
 ## 8. 真实环境待验收项
 
@@ -188,6 +198,7 @@ Release，但正常目标服务器安装不会自动执行它。
 
 ## 10. 结论
 
-CCOBridge `1.1.0` 已通过静态、单元、模拟协议、认证、流式、工具、镜像恢复、校验值、
-源码安装、离线安装、重复安装和卸载测试，可以作为受控 Release Candidate 发布。
+CCOBridge `1.2.0` 已通过静态、单元、模拟协议、多密钥认证、管理员隔离、Token 归属、
+流式、工具、镜像恢复、校验值、源码安装、离线安装、重复安装和卸载测试，可以作为
+受控 Release Candidate 发布。
 生产批准仍取决于目标环境中的真实模型和真实 Agent 验收。

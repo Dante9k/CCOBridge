@@ -2,12 +2,14 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE="${1:-ccobridge:1.1.0}"
+IMAGE="${1:-ccobridge:1.2.0}"
 CONTAINER_NAME="ccobridge-integration"
 FAKE_IMAGE="ccobridge-fake-ollama:test"
 FAKE_CONTAINER_NAME="ccobridge-fake-ollama-integration"
 CONTAINER_LOG="$(mktemp)"
 FAKE_LOG="$(mktemp)"
+RUNTIME_DIR="$(mktemp -d /tmp/ccobridge-integration.XXXXXX)"
+USER_KEY="sk-local-user-test"
 
 cleanup() {
   docker logs "$CONTAINER_NAME" >"$CONTAINER_LOG" 2>&1 || true
@@ -21,10 +23,20 @@ cleanup() {
     tail -n 200 "$CONTAINER_LOG" >&2 || true
   fi
   rm -f -- "$FAKE_LOG" "$CONTAINER_LOG"
+  case "$RUNTIME_DIR" in
+    /tmp/ccobridge-integration.*) rm -rf -- "$RUNTIME_DIR" ;;
+  esac
 }
 trap cleanup EXIT
 
 PYTHONPATH="$ROOT_DIR" python3 -m unittest discover -s "$ROOT_DIR/tests" -p 'test_*.py'
+
+mkdir -p "$RUNTIME_DIR/config" "$RUNTIME_DIR/data"
+chmod 0777 "$RUNTIME_DIR/data"
+USER_KEY_HASH="$(printf '%s' "$USER_KEY" | sha256sum | cut -d ' ' -f 1)"
+printf '%s\n' \
+  "{\"version\":1,\"users\":[{\"id\":\"usr_0123456789abcdef\",\"name\":\"alice\",\"role\":\"user\",\"key_hash\":\"sha256:${USER_KEY_HASH}\",\"enabled\":true,\"created_at\":\"2026-08-31T00:00:00Z\"}]}" \
+  > "$RUNTIME_DIR/config/users.json"
 
 docker build \
   --platform linux/amd64 \
@@ -57,8 +69,12 @@ docker run -d --rm \
   -e INTERNAL_LITELLM_PORT=14001 \
   -e OLLAMA_API_BASE=http://127.0.0.1:11435 \
   -e CCOBRIDGE_API_KEY=sk-local-integration-test \
+  -e CCOBRIDGE_KEYS_FILE=/etc/ccobridge/users.json \
+  -e CCOBRIDGE_USAGE_DB=/var/lib/ccobridge/usage.sqlite3 \
   -e 'CCOBRIDGE_MODEL_ALIASES={"qwen-code":"qwen3.8:latest","local-embed":"nomic-embed-text:latest"}' \
+  -v "$RUNTIME_DIR/config:/etc/ccobridge:ro" \
+  -v "$RUNTIME_DIR/data:/var/lib/ccobridge" \
   "$IMAGE" >/dev/null
 
-python3 "$ROOT_DIR/tests/integration_test.py"
+python3 "$ROOT_DIR/tests/integration_test.py" --user-key "$USER_KEY"
 TEST_PASSED=1

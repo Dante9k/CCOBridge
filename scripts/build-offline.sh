@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="1.1.0"
+VERSION="1.2.0"
 IMAGE="ccobridge:${VERSION}"
 BASE_TAG="ghcr.io/berriai/litellm:v1.94.0"
 DIST_DIR="$ROOT_DIR/dist"
@@ -95,6 +95,8 @@ for script_path in \
   deploy/start.sh \
   deploy/stop.sh \
   deploy/uninstall.sh \
+  deploy/usage.sh \
+  deploy/users.sh \
   deploy/verify.sh \
   scripts/build-offline.sh \
   scripts/check-public-release.py \

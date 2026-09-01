@@ -9,6 +9,7 @@
 ![LiteLLM: v1.94.0](https://img.shields.io/badge/LiteLLM-v1.94.0-6f42c1)
 ![Source deployable](https://img.shields.io/badge/source-deployable-success)
 ![Offline deployable](https://img.shields.io/badge/deployment-offline-success)
+![Multi-key](https://img.shields.io/badge/auth-multi--key-success)
 
 [中文](README.zh-CN.md) · [Operations](docs/OPERATION-MANUAL.md) · [Test report](docs/TEST-REPORT.md) · [Security](SECURITY.md)
 
@@ -22,8 +23,8 @@ and Claude Code can use the same gateway.
 OpenAI requests take a streaming fast path directly to Ollama. Anthropic Messages
 requests use a pinned LiteLLM converter and a focused compatibility layer that safely
 normalizes mid-conversation system content for strict model templates. The project
-ships without a database, Redis, admin UI, billing system, or external telemetry
-service.
+uses local SQLite for aggregate per-user token usage and ships without PostgreSQL,
+Redis, an admin UI, a billing system, or external telemetry.
 
 > [!IMPORTANT]
 > CCOBridge improves protocol and deployment compatibility; it cannot make a model
@@ -36,7 +37,8 @@ service.
 Ollama already implements parts of the OpenAI API, and direct access is the simplest
 choice for a trusted single-user machine. CCOBridge is useful when you need:
 
-- a real shared API key instead of Ollama's ignored placeholder key;
+- independently revocable user API keys instead of Ollama's ignored placeholder key;
+- aggregate request and backend-reported token usage by user, model, and endpoint;
 - one protected network port while keeping port 11434 private;
 - dynamic model discovery plus stable aliases such as `qwen-code`;
 - Anthropic Messages for Claude Code and Anthropic SDK clients;
@@ -57,7 +59,8 @@ OpenAI SDK / Cursor / Continue / OpenCode / agent frameworks
                               │ OpenAI-compatible API
                               ▼
                        CCOBridge :4000
-                       ├─ API-key authentication
+                       ├─ multi-key authentication
+                       ├─ local SQLite usage aggregation
                        ├─ dynamic models and aliases
                        ├─ OpenAI streaming fast path ───────────┐
                        └─ Anthropic normalization               │
@@ -86,7 +89,7 @@ sudo ./deploy/install.sh --online
 ```
 
 The installer downloads the digest-pinned LiteLLM base image when it is not already
-cached, builds `ccobridge:1.1.0` from the checked-out source, generates a protected API
+cached, builds `ccobridge:1.2.0` from the checked-out source, generates a protected admin API
 key, starts the gateway, and runs live acceptance checks. Running the installer again
 preserves the existing key and configuration.
 
@@ -105,6 +108,8 @@ comes from an offline Release, otherwise it builds from source. Use `--online` o
 | `POST` | `/v1/completions` | Streaming pass-through to Ollama | Legacy completion clients |
 | `POST` | `/v1/embeddings` | Streaming pass-through to Ollama | RAG and vector workflows |
 | `POST` | `/v1/messages` | Normalization + LiteLLM | Claude Code and Anthropic clients |
+| `GET` | `/admin/users` | CCOBridge | Admin-only user metadata without keys |
+| `GET` | `/admin/usage` | CCOBridge + SQLite | Admin-only aggregate usage |
 | `GET` | `/health/liveliness` | CCOBridge | Process health |
 | `GET` | `/health/readiness` | CCOBridge + upstream checks | Ollama and LiteLLM readiness |
 
@@ -198,6 +203,46 @@ export CCOBRIDGE_MODEL='qwen-code'
 Claude Code tool quality depends heavily on the selected model. Passing the API tests
 does not guarantee reliable file editing or command execution.
 
+## Per-user keys and token usage
+
+The `CCOBRIDGE_API_KEY` generated during installation is the administrator key. Keep
+using it for acceptance checks and management endpoints. Create a separate key for
+each user:
+
+```bash
+cd /opt/ccobridge
+sudo ./users.sh add alice
+sudo ./users.sh list
+```
+
+A new key is displayed once. Only its SHA-256 digest is stored in
+`config/users.json`; recoverable user keys are never written to disk. The gateway
+reloads the file after atomic updates, so these operations require no restart:
+
+```bash
+sudo ./users.sh disable alice
+sudo ./users.sh enable alice
+sudo ./users.sh rotate alice
+```
+
+Rotation immediately invalidates the old key and displays the replacement once.
+User keys can call inference APIs but receive HTTP 403 from `/admin/users` and
+`/admin/usage`.
+
+View all usage for the last 30 days or filter by a user ID:
+
+```bash
+sudo ./usage.sh
+sudo ./usage.sh 30 usr_0123456789abcdef
+```
+
+UTC-day aggregates are stored in `data/usage.sqlite3` by user, model, and endpoint.
+Only request counts, success counts, metering coverage, and input/output/total tokens
+are stored—never prompts or response bodies. If `metered_requests` is lower than
+`requests`, the backend omitted usage for some responses. CCOBridge does not estimate
+missing streaming usage from character counts, so these figures support capacity and
+fair-use analysis rather than billing.
+
 ## Dynamic models and aliases
 
 `GET /v1/models` reads Ollama `/api/tags` on every request. Installing or removing an
@@ -260,9 +305,9 @@ Download the offline archive and adjacent checksum from the GitHub Release on a
 connected machine, transfer both files, then run:
 
 ```bash
-sha256sum -c ccobridge-offline-1.1.0-linux-amd64.tar.gz.sha256
-tar -xzf ccobridge-offline-1.1.0-linux-amd64.tar.gz
-cd ccobridge-offline-1.1.0
+sha256sum -c ccobridge-offline-1.2.0-linux-amd64.tar.gz.sha256
+tar -xzf ccobridge-offline-1.2.0-linux-amd64.tar.gz
+cd ccobridge-offline-1.2.0
 sudo ./deploy/install.sh --offline
 ```
 
@@ -285,10 +330,13 @@ sudo /opt/ccobridge/start.sh
 sudo /opt/ccobridge/stop.sh
 sudo /opt/ccobridge/logs.sh
 sudo /opt/ccobridge/verify.sh
+sudo /opt/ccobridge/users.sh list
+sudo /opt/ccobridge/usage.sh
 sudo /opt/ccobridge/uninstall.sh
 ```
 
-Uninstall removes the container while preserving the image, configuration, and key.
+Uninstall removes the container while preserving the image, `.env`, user-key digests,
+and usage database.
 
 ## Build and test
 
@@ -316,7 +364,8 @@ Full Docker integration:
 make integration
 ```
 
-The deterministic Fake Ollama suite covers authentication, dynamic model discovery,
+The deterministic Fake Ollama suite covers multi-key authentication, administrator
+isolation, token attribution, dynamic model discovery,
 aliases, Chat Completions, Responses, Embeddings, OpenAI and Anthropic streaming,
 system normalization, tool definitions, tool calls, tool results, and downstream
 model resolution. Fake Ollama remains test-only source in the full-source Release and
@@ -329,7 +378,7 @@ Runtime configuration is stored in `/opt/ccobridge/.env`:
 
 | Variable | Required | Default | Purpose |
 |---|---:|---|---|
-| `CCOBRIDGE_API_KEY` | yes | none | Shared Bearer or `x-api-key` credential |
+| `CCOBRIDGE_API_KEY` | yes | none | Administrator Bearer or `x-api-key` credential |
 | `OLLAMA_API_BASE` | no | `http://127.0.0.1:11434` | Host Ollama API |
 | `CCOBRIDGE_MODEL_ALIASES` | no | `qwen-code` alias | JSON alias map |
 | `GATEWAY_PORT` | no | `4000` | Public listener under host networking |
@@ -341,15 +390,16 @@ Do not set it to a different value from `CCOBRIDGE_API_KEY`.
 
 ## Security model
 
-CCOBridge 1.1 targets a trusted internal network. It provides a shared API key but not
-TLS, per-user identity, rate limiting, SSO, or user-level audit trails. Restrict port
+CCOBridge 1.2 targets a trusted internal network. It provides per-user keys and
+aggregate usage, but not TLS, rate limiting, quotas, SSO, or billing. Restrict port
 4000 with a host or network firewall and never expose unauthenticated Ollama port 11434
 to clients.
 
 The compatibility proxy does not log request or response bodies. It strips client
 credentials before forwarding OpenAI-compatible traffic to Ollama. The installation
-key is generated at runtime, stored with mode `0600`, and is not embedded in the image
-or release archive.
+admin key is generated at runtime and stored with mode `0600`. User keys are displayed
+once and only their digests remain on disk. No key is embedded in the image or release
+archive.
 
 Before publication, run:
 
@@ -368,7 +418,7 @@ Read [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
 - Model capabilities are not fabricated. Use an embedding model for embeddings and a
   tool-capable model for agent tools.
 - Alias resolution is intentionally static and one level deep.
-- CCOBridge is not a multi-user management, billing, or provider-routing platform.
+- CCOBridge does not provide an admin UI, quotas, billing, SSO, or provider routing.
 - This independent project is not affiliated with or endorsed by Ollama, Anthropic,
   Claude Code, OpenAI, Qwen, or BerriAI/LiteLLM.
 

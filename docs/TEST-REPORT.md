@@ -1,7 +1,7 @@
 # CCOBridge Test Report
 
 - Report date: 2026-08-31
-- Tested release: `1.1.0`
+- Tested release: `1.2.0`
 
 Conclusion: simulated protocol, image recovery, source installation, and offline installation tests passed;
 real-model and real-Agent acceptance remains environment-specific
@@ -27,13 +27,13 @@ The following terms are used deliberately:
 | Linux distribution | Ubuntu 22.04 |
 | Docker Engine | 29.7.2 |
 | Target platform | Linux / amd64 |
-| Gateway image | `ccobridge:1.1.0` |
+| Gateway image | `ccobridge:1.2.0` |
 | Runtime identity | `10001:10001` |
 | LiteLLM | `v1.94.0` |
 | Base digest | `sha256:65d84a2282137b4dc73bbe184650a7c807177c533e4223b3bfbc87963fe3fabe` |
 | Upstream | separate deterministic Fake Ollama container |
 | Network | Linux host networking |
-| Database / Redis | none |
+| Persistence | local SQLite usage aggregates; no PostgreSQL or Redis |
 
 Fake Ollama implements the minimum deterministic surface used by the suite:
 
@@ -51,7 +51,7 @@ never copied into the production image.
 
 | Check | Evidence | Result |
 |---|---|---|
-| Python unit tests | 16 tests for system normalization, alias parsing, resolution, and model discovery | Passed |
+| Python unit tests | 24 tests for system, aliases, models, multi-key auth, and usage | Passed |
 | Ruff lint | selected bug, style, import, modernization, and simplification rules | Passed |
 | Ruff format | repository Python formatting check | Passed |
 | ShellCheck | client, deployment, build, integration, and lifecycle scripts | Passed |
@@ -71,7 +71,7 @@ ordering, timestamps, and malformed Ollama payloads.
 |---|---|---|
 | Liveness and readiness | gateway, Ollama tags, and internal LiteLLM are ready | Passed |
 | Missing authentication | protected endpoint returns OpenAI-shaped HTTP 401 | Passed |
-| Bearer authentication | correct shared key authorizes OpenAI paths | Passed |
+| Bearer authentication | administrator and independent user keys authorize inference | Passed |
 | Anthropic `x-api-key` | correct key retrieves an individual model | Passed |
 | Dynamic discovery | native chat and embedding models are returned | Passed |
 | Alias discovery | installed alias targets are advertised | Passed |
@@ -79,6 +79,11 @@ ordering, timestamps, and malformed Ollama payloads.
 | Alias routing | public chat alias resolves to the native Ollama model | Passed |
 | Native routing | native Ollama model passes through unchanged | Passed |
 | Credential isolation | Bearer and `x-api-key` headers do not reach Ollama | Passed |
+| Digest-only user keys | configuration contains SHA-256 digests, not plaintext user keys | Passed |
+| Administrator isolation | user key receives 403 from `/admin/users` and `/admin/usage` | Passed |
+| User listing | administrator receives non-secret user metadata | Passed |
+| Token attribution | Chat usage is assigned to the requesting user, model, and endpoint | Passed |
+| Metering coverage | requests and metered requests are counted separately | Passed |
 | Chat Completions | deterministic OpenAI response is preserved | Passed |
 | Chat SSE | split events reconstruct the expected text | Passed |
 | Completions | legacy completion response is preserved | Passed |
@@ -104,7 +109,7 @@ proves that the gateway does not depend on a single baked model name.
 The release builder completed all seven stages:
 
 1. pulled LiteLLM `v1.94.0` and matched the resolved digest to `BASE-IMAGE.lock`;
-2. built `ccobridge:1.1.0` for `linux/amd64`;
+2. built `ccobridge:1.2.0` for `linux/amd64`;
 3. ran the unit and two-container integration suite;
 4. exported the production image with `docker save`;
 5. packaged the complete tracked source and verified the inner manifest and outer
@@ -128,8 +133,8 @@ The release builder completed all seven stages:
 Generated deliverables:
 
 ```text
-dist/ccobridge-offline-1.1.0-linux-amd64.tar.gz
-dist/ccobridge-offline-1.1.0-linux-amd64.tar.gz.sha256
+dist/ccobridge-offline-1.2.0-linux-amd64.tar.gz
+dist/ccobridge-offline-1.2.0-linux-amd64.tar.gz.sha256
 ```
 
 The exact gateway image ID, source revision, build time, base digest, and target
@@ -151,9 +156,12 @@ The lifecycle assertions passed:
 - the local image loaded and started with `--pull never`;
 - live model, Chat Completions, Responses, and Anthropic verification passed;
 - the generated `sk-...` key file had mode `0600`;
+- user-key creation, automatic reload, disable, and re-enable passed;
+- plaintext user keys were absent from configuration and digest-file ownership matched policy;
+- per-user Chat token usage persisted in local SQLite;
 - host networking, `unless-stopped`, and non-root runtime identity matched policy;
-- a second installation preserved the exact `.env` contents and key;
-- uninstall removed the gateway container while retaining image and `.env`; and
+- a second installation preserved `.env`, user configuration, and the usage database;
+- uninstall removed the gateway container while retaining image, `.env`, users, and usage; and
 - the production image was removed and rebuilt from the source tree using the pinned,
   locally cached base image;
 - source-mode installation passed the same live checks and recorded
@@ -166,17 +174,20 @@ target-server installation.
 
 ## 7. Security and privacy observations
 
-- Public inference endpoints require a constant-time compared shared key.
+- Public inference endpoints compare the administrator and every user-key digest in constant time.
 - Both Bearer and `x-api-key` inputs are accepted; neither is forwarded to Ollama.
 - Health endpoints reveal only coarse service status.
 - Unsupported routes do not expose the internal LiteLLM management plane.
 - CCOBridge does not log request or response bodies and disables Uvicorn access logs.
-- The installer creates credentials only at runtime and preserves existing secrets.
+- The installer creates the administrator credential at runtime; user keys are shown
+  once and only their digests are persisted.
+- SQLite stores identity, model, endpoint, and aggregate counts, never prompt or response bodies.
 - The publication scanner found no private endpoint, user-profile path, private key,
   GitHub token, AWS access key, or long production-style `sk-...` literal.
 
 This is not a penetration test or dependency vulnerability audit. The default profile
-still uses HTTP and one shared key and must remain on a trusted network.
+still uses HTTP and must remain on a trusted network. Token totals depend on usage
+reported by the upstream and are not a billing ledger.
 
 ## 8. Real-environment work still required
 
@@ -207,8 +218,9 @@ For each Agent and model combination:
 
 ## 10. Conclusion
 
-CCOBridge `1.1.0` passed the defined static, unit, simulated protocol, authentication,
-streaming, tools, image recovery, checksum, source installation, offline installation,
-repeated installation, and uninstall tests.
+CCOBridge `1.2.0` passed the defined static, unit, simulated protocol, multi-key
+authentication, administrator isolation, token attribution, streaming, tools, image
+recovery, checksum, source installation, offline installation, repeated installation,
+and uninstall tests.
 The result supports publishing a controlled release candidate. Production approval
 still depends on real-model and real-Agent acceptance in the target environment.

@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are provided for the latest `1.1.x` release. Older offline bundles
+Security fixes are provided for the latest `1.2.x` release. Older offline bundles
 should be upgraded after a replacement release is validated in your environment.
 
 ## Reporting a vulnerability
@@ -15,14 +15,21 @@ You should receive an acknowledgement within seven days. A fix timeline depends 
 
 ## Deployment security boundary
 
-- The default deployment uses HTTP and a shared bearer key. Expose port 4000 only to trusted networks.
-- Keep `/opt/ccobridge/.env` at mode `0600` and store the API key in a password manager.
+- The default deployment uses HTTP and local bearer keys. Expose port 4000 only to trusted networks.
+- Keep `/opt/ccobridge/.env` and `config/users.json` at mode `0600`; keep `config/`
+  and `data/` at mode `0700`.
+- Store the administrator and one-time user keys in a password manager. The gateway
+  stores only user-key SHA-256 digests and cannot recover a lost user key.
 - Do not publish port 11434 for client access; clients should use the authenticated gateway.
-- Rotate the API key if it appears in shell history, logs, screenshots, tickets, or source control.
-- Do not expose unsupported LiteLLM management endpoints; version 1.1 returns 404 for
+- Disable or rotate an affected user key if it appears in shell history, logs,
+  screenshots, tickets, or source control. Rotate the administrator key if it leaks.
+- Do not expose unsupported LiteLLM management endpoints; version 1.2 returns 404 for
   paths outside the documented inference and health API.
 - The gateway deliberately does not log request or response bodies, but upstream LiteLLM or infrastructure settings may change logging behavior. Review logs before sharing them.
-- The project does not provide TLS, user-level authorization, rate limits, or audit identity. Add those controls at a trusted internal edge when required.
+- Token aggregates contain user names, model names, and activity counts but never
+  prompts or response bodies. Protect and back up `data/usage.sqlite3` accordingly.
+- The project does not provide TLS, rate limits, quotas, SSO, or billing. Add those
+  controls at a trusted internal edge when required.
 
 Before publishing a change, run:
 

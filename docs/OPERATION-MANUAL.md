@@ -1,7 +1,7 @@
 # CCOBridge Operations Guide
 
-- Document version: 1.1
-- Bundle: `ccobridge-offline-1.1.0-linux-amd64.tar.gz`
+- Document version: 1.2
+- Bundle: `ccobridge-offline-1.2.0-linux-amd64.tar.gz`
 - Target: Ubuntu 20.04+, x86_64, Docker Engine, Docker Compose v2
 
 ## 1. Deployment model
@@ -67,14 +67,14 @@ and downloads that pinned base only when necessary.
 Transfer both files from the same release:
 
 ```text
-ccobridge-offline-1.1.0-linux-amd64.tar.gz
-ccobridge-offline-1.1.0-linux-amd64.tar.gz.sha256
+ccobridge-offline-1.2.0-linux-amd64.tar.gz
+ccobridge-offline-1.2.0-linux-amd64.tar.gz.sha256
 ```
 
 Verify the outer archive before extraction:
 
 ```bash
-sha256sum -c ccobridge-offline-1.1.0-linux-amd64.tar.gz.sha256
+sha256sum -c ccobridge-offline-1.2.0-linux-amd64.tar.gz.sha256
 ```
 
 Do not continue after a checksum mismatch.
@@ -82,8 +82,8 @@ Do not continue after a checksum mismatch.
 ## 4. Install the air-gapped Release
 
 ```bash
-tar -xzf ccobridge-offline-1.1.0-linux-amd64.tar.gz
-cd ccobridge-offline-1.1.0
+tar -xzf ccobridge-offline-1.2.0-linux-amd64.tar.gz
+cd ccobridge-offline-1.2.0
 sudo ./deploy/install.sh --offline
 ```
 
@@ -97,12 +97,13 @@ The installer:
 1. verifies every bundled file using `SHA256SUMS`;
 2. checks architecture, Docker, Compose, port 4000, existing container ownership,
    Ollama version, and installed models;
-3. builds `ccobridge:1.1.0` from source or loads it from the local Docker archive;
+3. builds `ccobridge:1.2.0` from source or loads it from the local Docker archive;
 4. installs lifecycle files into `/opt/ccobridge`;
-5. creates a random `sk-...` API key only when `.env` does not exist;
-6. adds the backwards-compatible `qwen-code` alias when `qwen3.8:latest` exists;
-7. starts with host networking, `restart: unless-stopped`, and `--pull never`; and
-8. runs model, Chat Completions, Responses, and Anthropic acceptance checks.
+5. creates a random administrator `sk-...` API key only when `.env` does not exist;
+6. creates protected user-key configuration and local usage-data directories;
+7. adds the backwards-compatible `qwen-code` alias when `qwen3.8:latest` exists;
+8. starts with host networking, `restart: unless-stopped`, and `--pull never`; and
+9. runs model, Chat Completions, Responses, and Anthropic acceptance checks.
 
 The installer does not print the key. Retrieve it directly from the protected server
 file through an approved administrative session, store it in a password manager, and
@@ -112,7 +113,7 @@ keep the server copy at mode `0600`:
 sudo stat -c '%a %n' /opt/ccobridge/.env
 ```
 
-Repeated installation preserves the existing `.env` and key.
+Repeated installation preserves `.env`, user-key digests, and the usage database.
 
 ## 5. Runtime configuration
 
@@ -250,13 +251,55 @@ For a coding Agent, verify:
 Record the Agent version, Ollama version, model digest, gateway image ID, request mode,
 and redacted results. Never publish prompts or paths containing confidential data.
 
-## 10. Routine operations
+## 10. Per-user keys and usage reporting
+
+The key in `.env` is the administrator credential for acceptance and management.
+Create one independent key per user:
+
+```bash
+cd /opt/ccobridge
+sudo ./users.sh add alice
+sudo ./users.sh list
+```
+
+Save the key displayed once; `config/users.json` stores only its SHA-256 digest.
+Changes reload automatically without a gateway restart:
+
+```bash
+sudo ./users.sh disable alice
+sudo ./users.sh enable alice
+sudo ./users.sh rotate alice
+```
+
+Rotation invalidates the old key immediately. User credentials cannot call management
+endpoints. View all usage for 30 days or filter by user ID:
+
+```bash
+sudo ./usage.sh
+sudo ./usage.sh 30 usr_0123456789abcdef
+```
+
+`data/usage.sqlite3` aggregates requests, successful requests, metered requests, and
+input/output/total tokens by UTC day, user, model, and endpoint. It stores no request
+or response body. Only backend-reported usage counts as metered, so do not use a report
+with incomplete coverage for billing.
+
+Direct management API calls require the administrator key:
+
+```bash
+curl -fsS 'http://127.0.0.1:4000/admin/usage?days=30' \
+  -H 'Authorization: Bearer <admin-key>'
+```
+
+## 11. Routine operations
 
 ```bash
 sudo /opt/ccobridge/start.sh
 sudo /opt/ccobridge/stop.sh
 sudo /opt/ccobridge/logs.sh
 sudo /opt/ccobridge/verify.sh
+sudo /opt/ccobridge/users.sh list
+sudo /opt/ccobridge/usage.sh
 ```
 
 With `restart: unless-stopped`, the container recovers after Docker or server restart.
@@ -265,10 +308,11 @@ An explicit `stop.sh` keeps it stopped until `start.sh` is run.
 Ollama model installation and removal are reflected dynamically in `/v1/models` and
 do not require a CCOBridge restart. Alias changes do require container recreation.
 
-## 11. Upgrade and rollback
+## 12. Upgrade and rollback
 
 Keep the previous release archive and checksum until the new version passes production
-acceptance. The installer preserves `/opt/ccobridge/.env`.
+acceptance. The installer preserves `/opt/ccobridge/.env`, `config/users.json`, and
+`data/usage.sqlite3`.
 
 To roll back, load the previous image and restore its matching Compose file and scripts:
 
@@ -282,20 +326,21 @@ sudo ./verify.sh
 Version 1.0 does not support dynamic model passthrough, Responses, or Embeddings through
 CCOBridge; confirm that clients use its `qwen-code` contract after rollback.
 
-## 12. Uninstall
+## 13. Uninstall
 
 ```bash
 sudo /opt/ccobridge/uninstall.sh
 ```
 
-This removes the container and preserves the image, `.env`, and API key. Back up `.env`
-before an administrator manually removes retained files.
+This removes the container and preserves the image, `.env`, user-key digests, and
+usage database. Back up `/opt/ccobridge` before manually removing retained files.
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 ### HTTP 401
 
-- Confirm the client key equals `CCOBRIDGE_API_KEY` in the server `.env`.
+- For an administrator client, confirm the key equals `CCOBRIDGE_API_KEY` in `.env`.
+- For a user, run `sudo ./users.sh list` and confirm the identity is `enabled`.
 - For a migrated 1.0 installation, confirm the legacy key is present and not conflicting.
 - Remove stale OpenAI or Anthropic credential variables.
 - Check for copied whitespace or quotes.
@@ -339,12 +384,21 @@ before an administrator manually removes retained files.
 - Treat poor argument selection as a model capability issue unless the captured
   downstream request proves protocol data was lost.
 
-## 14. Security checklist
+### Usage does not increase
+
+- Confirm the request used a user key and called inference rather than `/v1/models`.
+- Compare `requests` with `metered_requests`; an upstream response without usage only
+  increments the request count.
+- Confirm the data directory belongs to `10001:10001` and inspect logs for SQLite errors.
+
+## 15. Security checklist
 
 - Restrict port 4000 to trusted clients.
 - Keep Ollama port 11434 private.
 - Keep `.env` at mode `0600`.
-- Store and rotate the shared key under organizational policy.
+- Keep `config/users.json` at mode `0600` and `config/` plus `data/` at mode `0700`.
+- Give each person a separate key; disable or rotate it immediately after departure or
+  suspected disclosure.
 - Do not publish prompt-bearing logs or environment-specific diagnostics.
 - Add a trusted TLS edge before crossing an untrusted network.
 - Run `scripts/check-public-release.py` before every public release.

@@ -81,10 +81,12 @@ def main() -> None:
     parser.add_argument("--gateway", default="http://127.0.0.1:14000")
     parser.add_argument("--fake-ollama", default="http://127.0.0.1:11435")
     parser.add_argument("--key", default="sk-local-integration-test")
+    parser.add_argument("--user-key", default="sk-local-user-test")
     args = parser.parse_args()
 
     wait_for_health(args.gateway)
     auth = {"Authorization": f"Bearer {args.key}"}
+    user_auth = {"Authorization": f"Bearer {args.user_key}"}
     anthropic_headers = {
         **auth,
         "anthropic-version": "2023-06-01",
@@ -114,10 +116,16 @@ def main() -> None:
     assert status == 200, model
     assert model["id"] == "qwen-code", model
 
+    status, users = request_json(f"{args.gateway}/admin/users", headers=auth)
+    assert status == 200, users
+    assert any(user.get("name") == "alice" for user in users["data"]), users
+    status, forbidden = request_json(f"{args.gateway}/admin/users", headers=user_auth)
+    assert status == 403, forbidden
+
     status, chat = request_json(
         f"{args.gateway}/v1/chat/completions",
         method="POST",
-        headers=auth,
+        headers=user_auth,
         payload={
             "model": "qwen-code",
             "messages": [{"role": "user", "content": "CHAT_TEST"}],
@@ -384,9 +392,29 @@ def main() -> None:
     assert text_contains(result_capture, tool_block["id"]), result_capture
     assert text_contains(result_capture, "sunny"), result_capture
 
+    status, forbidden_usage = request_json(
+        f"{args.gateway}/admin/usage", headers=user_auth
+    )
+    assert status == 403, forbidden_usage
+    usage = None
+    for _attempt in range(20):
+        status, usage = request_json(
+            f"{args.gateway}/admin/usage?days=1&user=usr_0123456789abcdef",
+            headers=auth,
+        )
+        assert status == 200, usage
+        if usage["totals"]["requests"] >= 1:
+            break
+        time.sleep(0.1)
+    assert usage is not None
+    assert usage["totals"]["requests"] >= 1, usage
+    assert usage["totals"]["metered_requests"] >= 1, usage
+    assert usage["totals"]["input_tokens"] >= 12, usage
+    assert usage["totals"]["output_tokens"] >= 2, usage
+
     print(
         "Integration tests passed: auth, dynamic models, aliases, OpenAI endpoints, "
-        "Anthropic normalization, streaming, and tools"
+        "Anthropic normalization, streaming, tools, multi-key auth, and usage"
     )
 
 

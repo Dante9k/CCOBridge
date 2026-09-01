@@ -6,6 +6,12 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ### Added
 
+- Independent user API keys with one-time secret display, digest-only storage,
+  automatic reload, and enable, disable, and rotate operations.
+- Administrator-only `/admin/users` and `/admin/usage` endpoints.
+- Privacy-preserving SQLite aggregates for requests and backend-reported input,
+  output, and total tokens by UTC day, user, model, and endpoint.
+- Offline-capable `users.sh` and `usage.sh` management helpers.
 - One installer now supports connected source builds and checksum-verified offline
   image loading through explicit or automatic mode selection.
 - Release bundles now include the complete Git-tracked source tree alongside the
@@ -13,8 +19,11 @@ All notable changes are documented here. This project follows [Semantic Versioni
 
 ### Changed
 
+- The installation now creates and preserves protected `config/` and `data/`
+  directories and treats the original runtime key as the administrator credential.
+- The image and offline artifact version is now `1.2.0`.
 - The installation lifecycle test now validates both source and offline deployment
-  paths.
+  paths, user-key revocation, digest-only key storage, and persistent usage totals.
 
 ## [1.1.0] - 2026-08-27
 

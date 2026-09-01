@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 IMAGE="ccobridge:${VERSION}"
 BASE_TAG="ghcr.io/berriai/litellm:v1.94.0"
 BUNDLE_ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
@@ -10,6 +10,7 @@ IMAGE_ARCHIVE="$BUNDLE_ROOT/image/ccobridge-${VERSION}-linux-amd64.tar"
 INSTALL_MODE="auto"
 BUILD_INFO_SOURCE=""
 BUILD_INFO_TMP=""
+USER_KEY_TMP=""
 
 usage() {
   cat <<'EOF'
@@ -120,6 +121,9 @@ cleanup() {
   rm -f -- "$OLLAMA_TAGS" "$OLLAMA_VERSION_FILE"
   if [[ -n "$BUILD_INFO_TMP" ]]; then
     rm -f -- "$BUILD_INFO_TMP"
+  fi
+  if [[ -n "$USER_KEY_TMP" ]]; then
+    rm -f -- "$USER_KEY_TMP"
   fi
 }
 trap cleanup EXIT
@@ -235,7 +239,7 @@ fi
 printf 'Installing into %s...\n' "$INSTALL_DIR"
 install -d -m 0755 "$INSTALL_DIR"
 install -m 0644 "$BUNDLE_ROOT/deploy/compose.yaml" "$INSTALL_DIR/compose.yaml"
-for script_name in start stop logs verify uninstall; do
+for script_name in start stop logs verify uninstall users usage; do
   install -m 0755 "$BUNDLE_ROOT/deploy/${script_name}.sh" "$INSTALL_DIR/${script_name}.sh"
 done
 install -m 0644 "$BUILD_INFO_SOURCE" "$INSTALL_DIR/BUILD-INFO.txt"
@@ -260,6 +264,33 @@ elif [[ -f "$INSTALL_DIR/.env" ]]; then
 else
   printf '%s\n' 'The existing .env path is not a regular file.' >&2
   exit 1
+fi
+
+for persistent_directory in config data; do
+  persistent_path="$INSTALL_DIR/$persistent_directory"
+  if [[ -L "$persistent_path" ]] \
+    || [[ -e "$persistent_path" && ! -d "$persistent_path" ]]; then
+    printf 'Persistent path must be a real directory: %s\n' "$persistent_path" >&2
+    exit 1
+  fi
+  install -d -m 0700 -o 10001 -g 10001 "$persistent_path"
+done
+
+USER_KEY_FILE="$INSTALL_DIR/config/users.json"
+if [[ -L "$USER_KEY_FILE" ]] \
+  || [[ -e "$USER_KEY_FILE" && ! -f "$USER_KEY_FILE" ]]; then
+  printf 'User-key path must be a regular file: %s\n' "$USER_KEY_FILE" >&2
+  exit 1
+fi
+if [[ ! -e "$USER_KEY_FILE" ]]; then
+  USER_KEY_TMP="$(mktemp)"
+  printf '%s\n' '{"version":1,"users":[]}' > "$USER_KEY_TMP"
+  install -m 0600 -o 10001 -g 10001 "$USER_KEY_TMP" "$USER_KEY_FILE"
+  rm -f -- "$USER_KEY_TMP"
+  USER_KEY_TMP=""
+else
+  chown 10001:10001 "$USER_KEY_FILE"
+  chmod 0600 "$USER_KEY_FILE"
 fi
 
 printf '%s\n' '[5/6] Starting the gateway without pulling runtime images...'

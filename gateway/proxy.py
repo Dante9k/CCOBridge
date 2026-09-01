@@ -7,9 +7,11 @@ system content. Request and response bodies are never logged.
 
 from __future__ import annotations
 
-import hmac
+import asyncio
 import json
+import logging
 import os
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -17,12 +19,17 @@ from urllib.parse import urlsplit
 
 import httpx
 from starlette.applications import Starlette
-from starlette.background import BackgroundTask
 from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
+from gateway.auth import (
+    KeyConfigurationError,
+    KeyStore,
+    Principal,
+    runtime_admin_key,
+)
 from gateway.config import (
     AliasConfigurationError,
     load_model_aliases,
@@ -33,6 +40,9 @@ from gateway.normalize import (
     SystemMessageNormalizationError,
     normalize_anthropic_system_messages,
 )
+from gateway.usage import UsageAccumulator, UsageStore
+
+LOGGER = logging.getLogger(__name__)
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -116,27 +126,8 @@ def _normalize_ollama_base(raw_value: str) -> str:
     return value
 
 
-def _runtime_api_key() -> str:
-    primary = os.getenv("CCOBRIDGE_API_KEY")
-    legacy = os.getenv("LITELLM_MASTER_KEY")
-    if primary and legacy and primary != legacy:
-        raise RuntimeError(
-            "CCOBRIDGE_API_KEY and LITELLM_MASTER_KEY must match when both are set"
-        )
-    api_key = primary or legacy
-    if not api_key:
-        raise RuntimeError("CCOBRIDGE_API_KEY is required")
-    if not api_key.startswith("sk-") or len(api_key) < 16:
-        raise RuntimeError(
-            "CCOBRIDGE_API_KEY must start with 'sk-' and contain at least 16 characters"
-        )
-    return api_key
-
-
-def _is_authorized(request: Request) -> bool:
-    expected = request.app.state.api_key
+def _credential_candidates(request: Request) -> list[str]:
     candidates: list[str] = []
-
     authorization = request.headers.get("authorization", "")
     scheme, separator, credentials = authorization.partition(" ")
     if separator and scheme.lower() == "bearer" and credentials:
@@ -145,15 +136,28 @@ def _is_authorized(request: Request) -> bool:
     anthropic_key = request.headers.get("x-api-key")
     if anthropic_key:
         candidates.append(anthropic_key)
+    return candidates
 
-    return any(hmac.compare_digest(candidate, expected) for candidate in candidates)
 
-
-def _require_authorization(
-    request: Request, *, anthropic: bool = False
-) -> JSONResponse | None:
-    if _is_authorized(request):
-        return None
+def _require_principal(
+    request: Request, *, anthropic: bool = False, admin: bool = False
+) -> Principal | JSONResponse:
+    try:
+        principal = request.app.state.key_store.authenticate(
+            _credential_candidates(request)
+        )
+    except KeyConfigurationError:
+        LOGGER.exception("User-key configuration reload failed")
+        message = "API key configuration is unavailable"
+        if anthropic:
+            return _anthropic_error(message, 503, error_type="api_error")
+        return _openai_error(message, 503, error_type="gateway_error")
+    if principal is not None:
+        if admin and principal.role != "admin":
+            return _openai_error(
+                "Administrator API key required", 403, error_type="permission_error"
+            )
+        return principal
     message = "Invalid or missing API key"
     if anthropic:
         return _anthropic_error(message, 401, error_type="authentication_error")
@@ -174,12 +178,46 @@ def _rewrite_model(payload: Any, aliases: dict[str, str]) -> tuple[Any, bool]:
     return rewritten, True
 
 
-def _streaming_response(upstream: httpx.Response) -> StreamingResponse:
+def _public_model(payload: Any) -> str:
+    if isinstance(payload, dict) and isinstance(payload.get("model"), str):
+        return payload["model"]
+    return "unknown"
+
+
+def _metered_streaming_response(
+    request: Request,
+    upstream: httpx.Response,
+    principal: Principal,
+    model: str,
+) -> StreamingResponse:
+    accumulator = UsageAccumulator(upstream.headers.get("content-type", ""))
+
+    async def body() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in upstream.aiter_raw():
+                accumulator.feed(chunk)
+                yield chunk
+        finally:
+            accumulator.finish()
+            await upstream.aclose()
+            try:
+                await asyncio.shield(
+                    asyncio.to_thread(
+                        request.app.state.usage_store.record,
+                        principal,
+                        model,
+                        request.url.path,
+                        upstream.status_code,
+                        accumulator,
+                    )
+                )
+            except (OSError, sqlite3.Error):
+                LOGGER.exception("Failed to persist aggregate token usage")
+
     return StreamingResponse(
-        upstream.aiter_raw(),
+        body(),
         status_code=upstream.status_code,
         headers=_strip_response_headers(upstream.headers),
-        background=BackgroundTask(upstream.aclose),
     )
 
 
@@ -187,10 +225,22 @@ def _streaming_response(upstream: httpx.Response) -> StreamingResponse:
 async def lifespan(app: Starlette) -> AsyncIterator[None]:
     try:
         aliases = load_model_aliases(os.getenv("CCOBRIDGE_MODEL_ALIASES"))
-    except AliasConfigurationError as exc:
+        admin_key = runtime_admin_key()
+        key_store = KeyStore(admin_key, os.getenv("CCOBRIDGE_KEYS_FILE"))
+        usage_store = UsageStore(
+            os.getenv("CCOBRIDGE_USAGE_DB", "/tmp/ccobridge-usage.sqlite3")
+        )
+    except (
+        AliasConfigurationError,
+        KeyConfigurationError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
         raise RuntimeError(str(exc)) from exc
 
-    app.state.api_key = _runtime_api_key()
+    app.state.admin_key = admin_key
+    app.state.key_store = key_store
+    app.state.usage_store = usage_store
     app.state.aliases = aliases
     app.state.ollama_base = _normalize_ollama_base(
         os.getenv("OLLAMA_API_BASE", "http://127.0.0.1:11434")
@@ -205,6 +255,7 @@ async def lifespan(app: Starlette) -> AsyncIterator[None]:
     finally:
         await app.state.ollama_client.aclose()
         await app.state.litellm_client.aclose()
+        usage_store.close()
 
 
 async def home(request: Request) -> JSONResponse:
@@ -257,9 +308,9 @@ async def _discover_models(request: Request) -> list[dict[str, Any]] | JSONRespo
 
 
 async def list_models(request: Request) -> JSONResponse:
-    unauthorized = _require_authorization(request)
-    if unauthorized:
-        return unauthorized
+    principal = _require_principal(request)
+    if isinstance(principal, JSONResponse):
+        return principal
     models = await _discover_models(request)
     if isinstance(models, JSONResponse):
         return models
@@ -267,9 +318,9 @@ async def list_models(request: Request) -> JSONResponse:
 
 
 async def retrieve_model(request: Request) -> JSONResponse:
-    unauthorized = _require_authorization(request)
-    if unauthorized:
-        return unauthorized
+    principal = _require_principal(request)
+    if isinstance(principal, JSONResponse):
+        return principal
     models = await _discover_models(request)
     if isinstance(models, JSONResponse):
         return models
@@ -283,9 +334,9 @@ async def retrieve_model(request: Request) -> JSONResponse:
 
 
 async def forward_openai(request: Request) -> StreamingResponse | JSONResponse:
-    unauthorized = _require_authorization(request)
-    if unauthorized:
-        return unauthorized
+    principal = _require_principal(request)
+    if isinstance(principal, JSONResponse):
+        return principal
 
     raw_body = await request.body()
     try:
@@ -293,6 +344,7 @@ async def forward_openai(request: Request) -> StreamingResponse | JSONResponse:
     except (json.JSONDecodeError, UnicodeDecodeError):
         return _openai_error("Request body must be valid UTF-8 JSON", 400)
 
+    public_model = _public_model(payload)
     payload, changed = _rewrite_model(payload, request.app.state.aliases)
     content = (
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -316,13 +368,13 @@ async def forward_openai(request: Request) -> StreamingResponse | JSONResponse:
         return _openai_error(
             "The Ollama service is unavailable", 502, error_type="gateway_error"
         )
-    return _streaming_response(upstream)
+    return _metered_streaming_response(request, upstream, principal, public_model)
 
 
 async def forward_anthropic(request: Request) -> StreamingResponse | JSONResponse:
-    unauthorized = _require_authorization(request, anthropic=True)
-    if unauthorized:
-        return unauthorized
+    principal = _require_principal(request, anthropic=True)
+    if isinstance(principal, JSONResponse):
+        return principal
 
     raw_body = await request.body()
     try:
@@ -334,6 +386,7 @@ async def forward_anthropic(request: Request) -> StreamingResponse | JSONRespons
         payload, normalized = normalize_anthropic_system_messages(payload)
     except SystemMessageNormalizationError as exc:
         return _anthropic_error(str(exc), 400)
+    public_model = _public_model(payload)
     payload, rewritten = _rewrite_model(payload, request.app.state.aliases)
     content = (
         json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -347,7 +400,7 @@ async def forward_anthropic(request: Request) -> StreamingResponse | JSONRespons
         target = f"{target}?{request.url.query}"
     headers = _strip_request_headers(request.headers, strip_authentication=True)
     headers.append(
-        (b"authorization", f"Bearer {request.app.state.api_key}".encode("latin-1"))
+        (b"authorization", f"Bearer {request.app.state.admin_key}".encode("latin-1"))
     )
     upstream_request = request.app.state.litellm_client.build_request(
         request.method,
@@ -365,7 +418,50 @@ async def forward_anthropic(request: Request) -> StreamingResponse | JSONRespons
             502,
             error_type="api_error",
         )
-    return _streaming_response(upstream)
+    return _metered_streaming_response(request, upstream, principal, public_model)
+
+
+async def list_users(request: Request) -> JSONResponse:
+    principal = _require_principal(request, admin=True)
+    if isinstance(principal, JSONResponse):
+        return principal
+    try:
+        users = request.app.state.key_store.users()
+    except KeyConfigurationError:
+        LOGGER.exception("User-key configuration reload failed")
+        return _openai_error(
+            "API key configuration is unavailable", 503, error_type="gateway_error"
+        )
+    return JSONResponse(
+        {
+            "object": "list",
+            "data": [
+                {
+                    "id": "admin",
+                    "name": "Administrator",
+                    "role": "admin",
+                    "enabled": True,
+                },
+                *users,
+            ],
+        }
+    )
+
+
+async def usage_report(request: Request) -> JSONResponse:
+    principal = _require_principal(request, admin=True)
+    if isinstance(principal, JSONResponse):
+        return principal
+    raw_days = request.query_params.get("days", "30")
+    try:
+        days = int(raw_days)
+    except ValueError:
+        return _openai_error("days must be an integer between 1 and 365", 400)
+    if not 1 <= days <= 365:
+        return _openai_error("days must be an integer between 1 and 365", 400)
+    key_id = request.query_params.get("user") or None
+    report = await asyncio.to_thread(request.app.state.usage_store.report, days, key_id)
+    return JSONResponse(report)
 
 
 async def not_found(request: Request) -> JSONResponse:
@@ -383,6 +479,8 @@ routes = [
     Route("/v1/models", list_models, methods=["GET"]),
     Route("/v1/models/{model_id:path}", retrieve_model, methods=["GET"]),
     Route("/v1/messages", forward_anthropic, methods=["POST"]),
+    Route("/admin/users", list_users, methods=["GET"]),
+    Route("/admin/usage", usage_report, methods=["GET"]),
     *(Route(path, forward_openai, methods=["POST"]) for path in OPENAI_FORWARD_PATHS),
     Route(
         "/{path:path}",
